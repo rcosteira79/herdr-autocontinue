@@ -20,7 +20,10 @@ agent when it is over.
   weekly limit and not the 5-hour one), it retries on a widening delay and
   gives up after five attempts instead of hammering the pane.
 
-Badges: `⏸3h09` seen but not armed · `⏳3h09` armed, will continue · `⚠` gave up.
+Badges: `🔄` armed, standing by · `🔄3h09` armed, will continue · `⏸3h09` seen
+but not armed · `⚠` gave up. An armed agent carries the glyph from the moment
+you arm it, so arming is visible without waiting for a wall; the countdown is
+what a wall adds. No badge means not armed and nothing seen.
 
 ### Arming is opt-in, per agent
 
@@ -81,9 +84,12 @@ or resume anything. That is `arm` and the list, under `open-list`.
 
 **2. Keybindings** — `herdr server reload-config` after editing these:
 
+`prefix+c` is herdr's own `new_tab`, so bind arm to `prefix+ctrl+c` instead —
+a custom binding silently shadows the default rather than reporting a clash.
+
 ```toml
 [[keys.command]]
-key = "prefix+c"              # arm/disarm auto-continue on the focused agent
+key = "prefix+ctrl+c"         # arm/disarm auto-continue on the focused agent
 type = "plugin_action"
 command = "rcosteira.autocontinue.arm"
 description = "arm auto-continue"
@@ -119,7 +125,16 @@ also where you arm them.
 | `AUTOCONTINUE_BLIND_RETRY_MIN` | `20` | retry cadence when the message names no time |
 | `AUTOCONTINUE_TAIL_LINES` | `15` | how many tail lines of a pane count as "the wall" |
 | `AUTOCONTINUE_READ_LINES` | `60` | rows read from each pane per poll |
-| `AUTOCONTINUE_KINDS` | `claude,codex` | agent kinds to watch |
+| `AUTOCONTINUE_KINDS` | *(empty)* | kinds to watch; empty means every kind herdr detects |
+| `AUTOCONTINUE_USE_ACCOUNT` | `1` | ask the account when its window reopens |
+| `AUTOCONTINUE_ACCOUNT_KINDS` | `claude,omp` | kinds billed to the Claude account |
+| `AUTOCONTINUE_ACCOUNT_PERCENT` | `100` | percent at which a window counts as spent |
+| `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
+| `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
+| `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
+| `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
+| `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
+| `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed |
 | `AUTOCONTINUE_DRY_RUN` | `0` | detect, badge and log, but never type |
 | `HERDR_BIN_PATH` | `herdr` | herdr binary (set by herdr when it invokes an action) |
 
@@ -133,18 +148,67 @@ also where you arm them.
   "usage limit reached" further up the scrollback is far more likely to be the
   agent *talking* about rate limits than hitting one. A wall also has to be
   seen on two consecutive polls before it is recorded.
-- Reset time: parsed out of the matched line and the three under it. Understood
-  today: `resets 12pm`, `resets 3:30pm`, `resets 15:00`, `resets Feb 3 at 9am`,
-  `will reset at 3pm (Europe/Lisbon)` (named zones resolve through `zoneinfo`),
-  `try again in 4 days 2 hours 46 minutes`, ISO timestamps, and unix epochs. A
-  wall whose message names no time (`Limits reset every 5h and every week`) is
-  re-checked every `AUTOCONTINUE_BLIND_RETRY_MIN` instead.
+- Account usage: a second, wording-free signal. See below.
+- Reset time, in order of preference: the message, then the account, then a
+  blind retry every `AUTOCONTINUE_BLIND_RETRY_MIN`. From a message these are
+  understood: `resets 12pm`, `resets 3:30pm`, `resets 15:00`,
+  `resets Feb 3 at 9am`, `will reset at 3pm (Europe/Lisbon)` (named zones
+  resolve through `zoneinfo`), `try again in 4 days 2 hours 46 minutes`, ISO
+  timestamps, and unix epochs.
 - Resume: `herdr agent prompt <pane> "continue"`, which submits atomically with
   Enter. Retry delays are 5m, 15m, 45m, then hourly.
 - Badges: `herdr pane report-metadata --token wall=…` with a TTL of four polls.
   The token is `wall`, not `limit`, because `senna-lang/herdr-agent-usage`
   already writes `$limit`; two plugins writing one token would overwrite each
   other.
+
+## The account as a second signal
+
+A usage limit belongs to the **account**, not to the pane. Every harness signed
+into the same Claude account shares one window. So the account can be asked when
+that window reopens, instead of reading it off a screen:
+
+```
+GET https://api.anthropic.com/api/oauth/usage
+Authorization: Bearer <token>      # the same credential store the CLI reads
+anthropic-beta: oauth-2025-04-20
+```
+
+It answers with a `limits` list — `kind`, `percent`, `severity`, `resets_at`:
+
+```
+session         percent=  0   severity=normal   resets 2026-08-22T23:09:59Z
+weekly_all      percent= 61   severity=normal   resets 2026-08-27T13:59:59Z
+weekly_scoped   percent=  6   severity=normal   resets 2026-08-27T13:59:59Z
+```
+
+This matters because it is **wording-free**. A harness nobody has written a rule
+for still gets detected and resumed, as long as it bills to the account. That is
+what makes the plugin work beyond Claude Code.
+
+It is used two ways:
+
+- **Filling in a blank time.** A wall whose message names no time takes the
+  account's reset instead of a blind retry.
+- **Detecting a wall at all.** For a kind in `AUTOCONTINUE_ACCOUNT_KINDS`, a
+  spent window is itself the wall, whatever the screen says.
+
+`AUTOCONTINUE_ACCOUNT_KINDS` defaults to `claude,omp` — the kinds billed to a
+Claude account. `codex` is deliberately absent: it bills elsewhere, so an
+exhausted Claude account says nothing about it. Add your own harness to that
+list, and it inherits the whole mechanism with no rule to write.
+
+A window counts as spent at `AUTOCONTINUE_ACCOUNT_PERCENT` (default `100`).
+`severity` is read and logged but not trusted, because the only value seen so
+far is `normal` — a guessed name could stop the fleet on a mere warning. Once
+you have seen the real one, name it in `AUTOCONTINUE_ACCOUNT_SEVERITIES`.
+
+The endpoint is unofficial and can change or vanish. Everything here fails soft:
+no token, no network, or an unrecognised shape all fall back to the text rules,
+which keep working on their own. `AUTOCONTINUE_USE_ACCOUNT=0` turns it off. The
+answer is cached for `AUTOCONTINUE_USAGE_TTL_S` (180s) and asked for at most
+once per `AUTOCONTINUE_USAGE_MIN_GAP_S` (30s), shared across every pane, so a
+ten-second loop over seventeen panes is still one request every three minutes.
 
 ## Fragility
 

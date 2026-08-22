@@ -32,9 +32,11 @@ import fcntl
 import json
 import os
 import re
+import platform
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta
 
 PLUGIN_ID = os.environ.get("HERDR_PLUGIN_ID", "rcosteira.autocontinue")
@@ -77,18 +79,27 @@ GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
 DRY_RUN = _flag("AUTOCONTINUE_DRY_RUN")
+IS_MAC = platform.system() == "Darwin"
+
+# Empty means "every kind herdr detects". Name kinds here to narrow it.
 KINDS = [
     k.strip().lower()
-    for k in os.environ.get("AUTOCONTINUE_KINDS", "claude,codex").split(",")
+    for k in os.environ.get("AUTOCONTINUE_KINDS", "").split(",")
     if k.strip()
 ]
 
 # Not "limit": senna-lang/herdr-agent-usage already writes a $limit token, and
 # two plugins writing one token would fight over it.
 TOKEN = "wall"
-GLYPH_ARMED = "\N{HOURGLASS WITH FLOWING SAND}"   # ⏳ will be continued
-GLYPH_IDLE = "\N{DOUBLE VERTICAL BAR}"            # ⏸ seen, not armed
-GLYPH_GAVEUP = "\N{WARNING SIGN}"                 # ⚠ gave up
+GLYPH_ARMED = os.environ.get("AUTOCONTINUE_GLYPH_ARMED") or (
+    "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS}"  # 🔄 will resume
+)
+GLYPH_IDLE = os.environ.get("AUTOCONTINUE_GLYPH_SEEN") or (
+    "\N{DOUBLE VERTICAL BAR}"                     # ⏸ seen, not armed
+)
+GLYPH_GAVEUP = os.environ.get("AUTOCONTINUE_GLYPH_GAVEUP") or (
+    "\N{WARNING SIGN}"                            # ⚠ gave up
+)
 TTL_MS = int(POLL_S * 4 * 1000)
 
 MONTHS = {m: i for i, m in enumerate(
@@ -173,13 +184,23 @@ def live_agents():
 
 
 def kind_of(info):
+    """The agent kind herdr reports, or None when this pane is not watched.
+
+    With no AUTOCONTINUE_KINDS set, every kind herdr detects is watched, not
+    just claude and codex. herdr knows some twenty agents and the rules already
+    say which kind they apply to, so the kind list is a filter, not a gate.
+    Detection is read-only: nothing is ever typed into a pane you did not arm.
+    """
     label = " ".join(
         str(info.get(k) or "") for k in ("agent", "name", "display_agent")
     ).lower()
-    for kind in KINDS:
-        if kind in label:
-            return kind
-    return None
+    if KINDS:
+        for kind in KINDS:
+            if kind in label:
+                return kind
+        return None
+    agent = str(info.get("agent") or "").strip().lower()
+    return agent or None
 
 
 def pane_text(pane_id):
@@ -382,18 +403,36 @@ def _countdown(seconds):
     return f"{days}d{hours}h"
 
 
-def set_badge(pane_id, wall, armed):
-    if wall["status"] == "gaveup":
-        text = GLYPH_GAVEUP
-    else:
-        glyph = GLYPH_ARMED if pane_id in armed else GLYPH_IDLE
-        text = glyph + _countdown(wall["resume_at"] - time.time())
+def _set_token(pane_id, text):
     herdr(
         "pane", "report-metadata", pane_id,
         "--source", PLUGIN_ID,
         "--token", f"{TOKEN}={text}",
         "--ttl-ms", str(TTL_MS),
     )
+
+
+def set_badge(pane_id, wall, armed):
+    if wall["status"] == "gaveup":
+        text = GLYPH_GAVEUP
+    else:
+        glyph = GLYPH_ARMED if pane_id in armed else GLYPH_IDLE
+        text = glyph + _countdown(wall["resume_at"] - time.time())
+    _set_token(pane_id, text)
+
+
+def refresh_badge(pane_id, wall, armed):
+    """The badge has to say "armed" before a wall exists, not only after one.
+
+    Arming is the plugin's main switch and a wall may be days away, so an armed
+    pane carries the glyph on its own — the countdown is what a wall adds.
+    """
+    if wall:
+        set_badge(pane_id, wall, armed)
+    elif pane_id in armed:
+        _set_token(pane_id, GLYPH_ARMED)
+    else:
+        clear_badge(pane_id)
 
 
 def clear_badge(pane_id):
@@ -423,14 +462,176 @@ def drop_wall(pane_id, why):
     clear_badge(pane_id)
 
 
+# ---- account usage --------------------------------------------------------
+#
+# The limit belongs to the account, not to the pane. Every harness signed into
+# the same Claude account shares one window, so the account can be asked when
+# that window reopens instead of reading it off a screen. This is what makes
+# detection work for a harness whose wording nobody has written a rule for.
+#
+# Unofficial endpoint: it can change or disappear. Everything here fails soft
+# and the text rules keep working on their own.
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_BETA = "oauth-2025-04-20"
+USAGE_CACHE = os.path.join(STATE_DIR, "usage.json")
+USAGE_TTL_S = _num("AUTOCONTINUE_USAGE_TTL_S", 180.0)
+USAGE_MIN_GAP_S = _num("AUTOCONTINUE_USAGE_MIN_GAP_S", 30.0)
+USAGE_TIMEOUT_S = _num("AUTOCONTINUE_USAGE_TIMEOUT_S", 5.0)
+USE_ACCOUNT = _flag("AUTOCONTINUE_USE_ACCOUNT", default=True)
+# Kinds billed to the Claude account. A codex pane is not, so an exhausted
+# Claude account says nothing about it.
+ACCOUNT_KINDS = [
+    k.strip().lower()
+    for k in os.environ.get("AUTOCONTINUE_ACCOUNT_KINDS", "claude,omp").split(",")
+    if k.strip()
+]
+# A window at or above this percent counts as spent. Severity strings other
+# than "normal" are logged rather than trusted: the only value seen in the
+# wild so far is "normal", so a guessed name could block on a mere warning.
+ACCOUNT_PERCENT = _num("AUTOCONTINUE_ACCOUNT_PERCENT", 100.0)
+ACCOUNT_SEVERITIES = [
+    s.strip().lower()
+    for s in os.environ.get("AUTOCONTINUE_ACCOUNT_SEVERITIES", "").split(",")
+    if s.strip()
+]
+
+
+def _oauth_token():
+    """The Claude OAuth token, from the same store the CLI reads."""
+    if IS_MAC:
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password",
+                 "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                data = json.loads(out.stdout)
+                token = (data.get("claudeAiOauth") or {}).get("accessToken")
+                if token:
+                    return token
+        except Exception:
+            pass
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    try:
+        with open(os.path.join(base, ".credentials.json"), encoding="utf-8") as fh:
+            return (json.load(fh).get("claudeAiOauth") or {}).get("accessToken")
+    except Exception:
+        return None
+
+
+def _iso_to_epoch(text):
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _fetch_usage():
+    token = _oauth_token()
+    if not token:
+        return None
+    request = urllib.request.Request(
+        USAGE_URL,
+        headers={"Authorization": "Bearer %s" % token,
+                 "anthropic-beta": USAGE_BETA},
+    )
+    with urllib.request.urlopen(request, timeout=USAGE_TIMEOUT_S) as response:
+        return json.load(response)
+
+
+def usage_windows(force=False):
+    """[{kind, percent, severity, resets_at}] for the account, newest cached.
+
+    Cached on disk and shared by every pane in the poll, so a ten-second loop
+    over seventeen panes still asks the account at most once per USAGE_MIN_GAP_S.
+    """
+    if not USE_ACCOUNT:
+        return []
+    now = time.time()
+    cached = _load(USAGE_CACHE, {})
+    fetched_at = cached.get("fetched_at") or 0
+    fresh = (now - fetched_at) < USAGE_TTL_S
+    if cached.get("windows") is not None and fresh and not force:
+        return cached["windows"]
+    if (now - (cached.get("tried_at") or 0)) < USAGE_MIN_GAP_S and not force:
+        return cached.get("windows") or []
+    cached["tried_at"] = now
+    _save(USAGE_CACHE, cached)
+    try:
+        body = _fetch_usage()
+    except Exception as exc:
+        log("usage api: %s" % exc)
+        return cached.get("windows") or []
+    if not isinstance(body, dict):
+        return cached.get("windows") or []
+    windows = []
+    for entry in body.get("limits") or []:
+        if not isinstance(entry, dict):
+            continue
+        windows.append({
+            "kind": entry.get("kind"),
+            "group": entry.get("group"),
+            "percent": entry.get("percent"),
+            "severity": (entry.get("severity") or "").lower(),
+            "resets_at": _iso_to_epoch(entry.get("resets_at")),
+        })
+    if not windows:
+        # Older/other shape: the named windows carry the same two numbers.
+        for name in ("five_hour", "seven_day"):
+            block = body.get(name)
+            if isinstance(block, dict):
+                windows.append({
+                    "kind": name,
+                    "group": name,
+                    "percent": block.get("utilization"),
+                    "severity": "",
+                    "resets_at": _iso_to_epoch(block.get("resets_at")),
+                })
+    _save(USAGE_CACHE, {"fetched_at": now, "tried_at": now, "windows": windows})
+    return windows
+
+
+def _spent(window):
+    percent = window.get("percent")
+    severity = window.get("severity") or ""
+    if severity and severity != "normal" and severity in ACCOUNT_SEVERITIES:
+        return True
+    return isinstance(percent, (int, float)) and percent >= ACCOUNT_PERCENT
+
+
+def account_block():
+    """(resets_at, kind, percent) for a spent window, else None."""
+    spent = [w for w in usage_windows() if _spent(w) and w.get("resets_at")]
+    if not spent:
+        return None
+    soonest = min(spent, key=lambda w: w["resets_at"])
+    return soonest["resets_at"], soonest.get("kind"), soonest.get("percent")
+
+
+def account_reset_for(kind):
+    """The soonest reset the account knows about, for filling in a blank time."""
+    if kind and ACCOUNT_KINDS and kind not in ACCOUNT_KINDS:
+        return None
+    times = [w["resets_at"] for w in usage_windows() if w.get("resets_at")]
+    return min(times) if times else None
+
+
 def new_wall(pane_id, kind, info, hit):
     rule_id, matched, context = hit
     now = time.time()
     reset_at, via = parse_reset(context)
+    if not reset_at:
+        # Nothing parseable on screen: ask the account when its window reopens.
+        # This is what carries a harness whose wording has no rule.
+        reset_at, via = account_reset_for(kind), "account"
     if reset_at:
         resume_at, reason = reset_at + GRACE_S, via
     else:
-        # No time in the message: come back periodically and look again.
+        # No time anywhere: come back periodically and look again.
         resume_at, reason = now + BLIND_RETRY_S, "blind"
     return {
         "pane_id": pane_id,
@@ -513,16 +714,29 @@ def tick(agents, pending):
             if wall:  # it is moving again; whatever we saw is history
                 drop_wall(pane_id, "agent working")
             pending.discard(pane_id)
+            refresh_badge(pane_id, None, armed)
             continue
 
         text = pane_text(pane_id)
         if text is None:
             continue  # unreadable this tick; leave the wall as it stands
         hit = find_wall(text, kind)
+        if hit is None and kind in ACCOUNT_KINDS:
+            # No wording matched, but the account itself is out. Every pane
+            # billed to it is stuck whatever its harness prints on screen.
+            spent = account_block()
+            if spent:
+                resets_at, window, percent = spent
+                hit = (
+                    "account:%s" % window,
+                    "account window %s at %s%%" % (window, percent),
+                    "resets %s" % datetime.fromtimestamp(resets_at).isoformat(),
+                )
         if hit is None:
             if wall:
                 drop_wall(pane_id, "message gone")
             pending.discard(pane_id)
+            refresh_badge(pane_id, None, armed)
             continue
 
         if wall is None:
@@ -681,9 +895,9 @@ def toggle_armed(pane_id):
             armed.add(pane_id)
             state = True
         save_armed(armed)
-    wall = load_walls().get(pane_id)
-    if wall:
-        set_badge(pane_id, wall, load_armed())
+    # Stamp now rather than waiting for the next poll: a keypress that changes
+    # nothing on screen for ten seconds reads as a keypress that did nothing.
+    refresh_badge(pane_id, load_walls().get(pane_id), load_armed())
     return state
 
 
@@ -876,6 +1090,9 @@ def cmd_ui(argv):
 
 # ---- sidebar wiring -------------------------------------------------------
 
+# Kinds whose rows_by_agent override needs the token merged in as well. The
+# watch list can be empty (meaning "all kinds"), which would merge into none.
+OVERRIDE_KINDS = KINDS or ["claude", "codex", "omp"]
 SIDEBAR_TABLE = "[ui.sidebar.agents]"
 OVERRIDE_TABLE = "[ui.sidebar.agents.rows_by_agent]"
 DEFAULT_ROWS = '[["state_icon", "workspace", "tab"], ["agent"]]'
@@ -1116,7 +1333,7 @@ def warn_if_unwired():
 
 
 def cmd_enable_badge(argv):
-    status, where, info = wire_sidebar(KINDS)
+    status, where, info = wire_sidebar(OVERRIDE_KINDS)
     if status == "wired":
         print("wired $%s into %s (%s)" % (TOKEN, config_path(), ", ".join(info)))
         print("backup: %s" % where)
@@ -1137,7 +1354,7 @@ def cmd_enable_badge(argv):
 
 def cmd_disable_badge(argv):
     """Stop showing the countdown badge: leave the rows, then clear the panes."""
-    status, where, info = unwire_sidebar(KINDS)
+    status, where, info = unwire_sidebar(OVERRIDE_KINDS)
     agents = live_agents() or {}
     for pane_id in agents:
         clear_badge(pane_id)
