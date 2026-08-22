@@ -1,0 +1,56 @@
+id = "rcosteira.autocontinue"
+name = "Auto Continue"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Watches agents for usage-limit walls, badges the countdown to the reset ($limit), and re-prompts the agents you armed once the window reopens."
+platforms = ["macos", "linux"]
+
+# Bring the watcher back up after a restart / live handoff. Armed panes are
+# keyed by pane id, so a session restore keeps its arming.
+[[startup]]
+command = ["python3", "autocontinue.py", "start"]
+
+# Arm/disarm the focused agent. Nothing is ever typed into a pane that is not
+# armed, so this is the plugin's main switch — bind it to a key (see README).
+[[actions]]
+id = "arm"
+title = "Auto-continue: arm/disarm the focused agent"
+contexts = ["pane", "global"]
+command = ["python3", "autocontinue.py", "arm"]
+
+[[actions]]
+id = "open-list"
+title = "Auto-continue: open list"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "open-list"]
+
+[[actions]]
+id = "start"
+title = "Auto-continue: start watcher"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "start"]
+
+[[actions]]
+id = "stop"
+title = "Auto-continue: stop watcher"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "stop"]
+
+[[actions]]
+id = "status"
+title = "Auto-continue: status"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "status"]
+
+# Detection report for the current panes; writes nothing, sends nothing.
+[[actions]]
+id = "scan"
+title = "Auto-continue: scan panes (dry)"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "scan"]
+
+[[panes]]
+id = "list"
+title = "Auto Continue"
+command = ["python3", "autocontinue.py", "ui"]
+placement = "overlay"

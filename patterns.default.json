@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Detection rules for usage-limit walls. Copy this file to",
+    "$(herdr plugin config-dir rcosteira.autocontinue)/patterns.json and edit it",
+    "when an agent changes its wording — a copy REPLACES this file wholesale.",
+    "",
+    "limit[]   a wall is a tail line matching one of these and none of exclude[].",
+    "          kind = null means 'any agent'.",
+    "reset[]   searched in the matched line and the 3 lines under it. The first",
+    "          pattern that yields a time wins, so order matters. Understood",
+    "          named groups: epoch | iso | days/hours/minutes | hour/minute/ampm",
+    "          with optional mon/day/tz.",
+    "exclude[] kills a candidate line: warnings and overflow notices, which look",
+    "          like walls but do not stop the agent."
+  ],
+
+  "limit": [
+    { "id": "claude-window", "kind": "claude",
+      "regex": "(?i)\\b\\d+\\s*-?\\s*hour limit reached\\b" },
+    { "id": "claude-weekly", "kind": "claude",
+      "regex": "(?i)\\bweekly limit reached\\b" },
+    { "id": "claude-usage", "kind": "claude",
+      "regex": "(?i)\\bclaude (?:ai )?usage limit reached\\b" },
+    { "id": "claude-model", "kind": "claude",
+      "regex": "(?i)\\b(?:opus|sonnet) (?:usage )?limit reached\\b" },
+    { "id": "codex-hit", "kind": "codex",
+      "regex": "(?i)you'?(?:ve|\\s*have)?\\s*hit your (?:usage|5h|weekly|rate) limit" },
+    { "id": "codex-window", "kind": "codex",
+      "regex": "(?i)\\b(?:5h|weekly|usage) limit reached\\b" },
+    { "id": "any-usage-limit", "kind": null,
+      "regex": "(?i)\\busage limit reached\\b" },
+    { "id": "any-quota", "kind": null,
+      "regex": "(?i)\\b(?:quota|rate limit) exceeded\\b" }
+  ],
+
+  "exclude": [
+    "(?i)\\bapproaching\\b",
+    "(?i)continuing with (?:usage )?credits",
+    "(?i)\\bextra usage\\b",
+    "(?i)\\bwill (?:soon )?(?:reach|hit)\\b",
+    "(?i)\\b(?:if|when|unless|whether) you (?:ve |have )?hit\\b",
+    "(?i)^\\s*(?:[-*+]|\\d+\\.)\\s",
+    "(?i)\\b(?:grep|rg|echo|cat|sed|awk)\\b"
+  ],
+
+  "reset": [
+    { "id": "epoch",
+      "regex": "(?i)\\bresets?[^0-9]{0,12}(?P<epoch>1[0-9]{9})\\b" },
+    { "id": "iso",
+      "regex": "(?i)\\breset(?:s|ting)?\\s+(?:at\\s+)?(?P<iso>\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}(?::\\d{2})?(?:Z|[+-]\\d{2}:?\\d{2})?)" },
+    { "id": "relative",
+      "regex": "(?i)\\b(?:try again|retry|resets?|available again|come back)\\s+in\\s+(?:(?P<days>\\d+)\\s*(?:d\\b|days?)\\s*)?(?:(?P<hours>\\d+)\\s*(?:h\\b|hours?|hrs?)\\s*)?(?:(?P<minutes>\\d+)\\s*(?:m\\b|mins?|minutes?))?" },
+    { "id": "clock-12h",
+      "regex": "(?i)\\breset(?:s|ting)?\\b(?!\\s+every\\b)[^0-9]{0,16}?(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(?P<day>\\d{1,2})(?:st|nd|rd|th)?[, ]+(?:at\\s+)?)?(?P<hour>\\d{1,2})(?::(?P<minute>\\d{2}))?\\s*(?P<ampm>[ap]\\.?m\\.?)(?:\\s*\\((?P<tz>[^)]{1,40})\\))?" },
+    { "id": "clock-24h",
+      "regex": "(?i)\\breset(?:s|ting)?\\b(?!\\s+every\\b)[^0-9]{0,16}?(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(?P<day>\\d{1,2})(?:st|nd|rd|th)?[, ]+(?:at\\s+)?)?(?P<hour>\\d{1,2}):(?P<minute>\\d{2})(?:\\s*\\((?P<tz>[^)]{1,40})\\))?" }
+  ]
+}
