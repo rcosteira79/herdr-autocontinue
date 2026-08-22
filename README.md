@@ -132,6 +132,8 @@ also where you arm them.
 | `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
 | `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
 | `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
+| `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
+| `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
 | `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed |
@@ -209,6 +211,42 @@ which keep working on their own. `AUTOCONTINUE_USE_ACCOUNT=0` turns it off. The
 answer is cached for `AUTOCONTINUE_USAGE_TTL_S` (180s) and asked for at most
 once per `AUTOCONTINUE_USAGE_MIN_GAP_S` (30s), shared across every pane, so a
 ten-second loop over seventeen panes is still one request every three minutes.
+
+## Rotating to another account
+
+If [account-switch](../account-switch) is installed, a spent account can hand
+over to another one you have saved, instead of everything waiting for the
+window to reopen. **This is off until you name the profiles it may use:**
+
+```sh
+AUTOCONTINUE_ROTATE_PROFILES="spare,overflow"
+```
+
+Only profiles on that list are ever switched to. There is no "any profile"
+mode on purpose: a switch is machine-wide, so an unnamed work account could
+otherwise start paying for a personal side-project without anyone deciding it.
+
+Rotation fires only when **a pane you armed** is walled and the account it bills
+to is spent. An unarmed pane never causes one, which keeps the rule that the
+plugin acts only where you opted in.
+
+It cannot check an account before switching to it. Only the live account keeps a
+fresh token; a parked snapshot's token has usually expired, so there is nothing
+to ask. Rotation therefore switches, prompts, and watches: if that account is
+spent as well, the wall returns and the next profile on the list is tried. One
+pass over the list per dry spell, then it waits for the soonest reset. The list
+resets once the account has capacity again.
+
+`AUTOCONTINUE_ROTATE_COOLDOWN_S` (default 300) is the minimum gap between
+switches, so a bad detection cannot flip accounts in a loop.
+
+### It keeps your logins current
+
+Switching away from an account used to leave its saved profile holding whatever
+tokens it had when you saved it. The CLI keeps renewing the live ones, so that
+copy went stale, and restoring a stale copy can leave an account unable to renew
+— which costs a browser login. Rotating would have made that routine, so
+`account-switch` now refreshes a profile's snapshot as it parks it.
 
 ## Fragility
 

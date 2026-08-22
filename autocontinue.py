@@ -78,6 +78,8 @@ PROMPT_TEXT = os.environ.get("AUTOCONTINUE_PROMPT", "continue")
 GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
+# Polls a pane must stay missing before its arming is dropped.
+ABSENT_POLLS = _num("AUTOCONTINUE_ABSENT_POLLS", 3, int)
 DRY_RUN = _flag("AUTOCONTINUE_DRY_RUN")
 IS_MAC = platform.system() == "Darwin"
 
@@ -653,6 +655,124 @@ def _backoff(attempts):
     return min(300 * (3 ** max(0, attempts - 1)), 3600)
 
 
+# ---- account rotation -----------------------------------------------------
+#
+# When the account is spent, a second account with capacity left can take over.
+# Switching credentials is machine-wide, so this only ever lands on a profile
+# you named, and only when a pane you armed is the one that is stuck.
+#
+# There is no way to ask a parked account whether it has capacity: only the live
+# account keeps a fresh token, so a saved snapshot cannot be queried. Rotation
+# therefore switches and watches. If the new account is spent too, the wall
+# comes back and the next profile is tried, up to one pass over the list.
+
+ROTATE_PROFILES = [
+    p.strip().lower()
+    for p in os.environ.get("AUTOCONTINUE_ROTATE_PROFILES", "").split(",")
+    if p.strip()
+]
+ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
+ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
+SWITCH_PLUGIN_ID = os.environ.get(
+    "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
+)
+
+
+def _switcher_script():
+    """Path to account-switch's switcher.py, or None when it is not installed."""
+    res = herdr("plugin", "list", "--plugin", SWITCH_PLUGIN_ID, "--json")
+    if res.returncode != 0:
+        return None
+    try:
+        data = json.loads(res.stdout or "{}")
+    except ValueError:
+        return None
+    plugins = (data.get("result") or {}).get("plugins") or []
+    if isinstance(plugins, dict):
+        plugins = [plugins]
+    for plugin in plugins:
+        root = plugin.get("plugin_root")
+        if not root:
+            continue
+        path = os.path.join(root, "switcher.py")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _switch_profiles(script, kind):
+    """[(slug, label, is_live)] for a kind, from account-switch's own status."""
+    res = subprocess.run(
+        ["python3", script, "list", "--kind", kind, "--json"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if res.returncode != 0:
+        return []
+    try:
+        data = json.loads(res.stdout or "[]")
+    except ValueError:
+        return []
+    return [
+        (p.get("slug"), p.get("label"), bool(p.get("active")))
+        for p in data if p.get("slug")
+    ]
+
+
+def rotate_account(kind):
+    """Switch to the next allowed profile with capacity. True when it switched.
+
+    Returns False when rotation is off, unavailable, on cooldown, or every
+    named profile has already been tried since the account ran out.
+    """
+    if not ROTATE_PROFILES:
+        return False
+    now = time.time()
+    state = _load(ROTATE_STATE, {})
+    if (now - (state.get("last_switch") or 0)) < ROTATE_COOLDOWN_S:
+        return False
+    script = _switcher_script()
+    if not script:
+        log("rotate: %s is not installed" % SWITCH_PLUGIN_ID)
+        return False
+    profiles = _switch_profiles(script, kind)
+    if not profiles:
+        return False
+    live = next((slug for slug, _, active in profiles if active), None)
+    tried = set(state.get("tried") or [])
+    if live:
+        tried.add(live)
+    allowed = [
+        slug for slug, label, _ in profiles
+        if slug not in tried
+        and (slug.lower() in ROTATE_PROFILES or (label or "").lower() in ROTATE_PROFILES)
+    ]
+    if not allowed:
+        return False
+    target = allowed[0]
+    res = subprocess.run(
+        ["python3", script, "switch", kind, target],
+        capture_output=True, text=True, timeout=60,
+    )
+    if res.returncode != 0:
+        log("rotate: switch to %s failed: %s"
+            % (target, (res.stderr or "").strip()[:200]))
+        return False
+    tried.add(target)
+    _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried)})
+    log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
+    herdr("notification", "show", "Auto-continue switched account",
+          "--body", (res.stdout or target).strip()[:200], "--sound", "none")
+    return True
+
+
+def clear_rotation_state():
+    """Called once the account has capacity again, so the next dry spell starts
+    from a full list rather than one already crossed off."""
+    if _load(ROTATE_STATE, {}).get("tried"):
+        _save(ROTATE_STATE, {})
+        log("rotate: account has capacity again, profile list reset")
+
+
 def attempt_resume(pane_id, wall, info):
     """Type into an armed pane whose window should have reopened. The caller
     has already confirmed, this tick, that the wall is still on screen."""
@@ -690,6 +810,9 @@ def attempt_resume(pane_id, wall, info):
     _update_walls(mutate)
 
 
+_absent = {}  # pane_id -> consecutive polls it has been missing from the list
+
+
 def tick(agents, pending):
     """One poll: badge every walled pane, resume the armed ones that are due."""
     walls = load_walls()
@@ -699,11 +822,29 @@ def tick(agents, pending):
     gone = [p for p in walls if p not in agents]
     for pane_id in gone:
         _update_walls(lambda w, p=pane_id: w.pop(p, None))
-    dead = armed - set(agents)
-    if dead:
-        with _Lock():
-            armed = load_armed() - dead
-            save_armed(armed)
+
+    # Disarm only a pane that has stayed missing. One incomplete agent list —
+    # herdr restarting, a config reload, a plugin relink — used to be enough to
+    # drop arming for good, silently, which is the one piece of state here a
+    # person set by hand.
+    for pane_id in list(_absent):
+        if pane_id in agents:
+            del _absent[pane_id]
+    if agents:
+        for pane_id in armed - set(agents):
+            _absent[pane_id] = _absent.get(pane_id, 0) + 1
+        dead = {p for p, misses in _absent.items() if misses >= ABSENT_POLLS}
+        if dead:
+            with _Lock():
+                armed = load_armed() - dead
+                save_armed(armed)
+            for pane_id in dead:
+                _absent.pop(pane_id, None)
+            log("disarmed %s (pane gone for %d polls)"
+                % (", ".join(sorted(dead)), ABSENT_POLLS))
+
+    if ROTATE_PROFILES and not account_block():
+        clear_rotation_state()
 
     for pane_id, info in agents.items():
         kind = kind_of(info)
@@ -757,6 +898,18 @@ def tick(agents, pending):
                 f"{'' if pane_id in armed else ' (not armed, watching only)'}")
 
         set_badge(pane_id, wall, armed)
+
+        # Rotation: only for a pane you armed, and only while the account it
+        # bills to is spent. A switch is machine-wide, so an unarmed pane never
+        # triggers one.
+        if (pane_id in armed and wall["status"] == "waiting"
+                and kind in ACCOUNT_KINDS and account_block()
+                and rotate_account(kind)):
+            # The account we just moved to may be spent as well. Prompting is
+            # how that shows: the wall returns and the next profile is tried.
+            attempt_resume(pane_id, wall, info)
+            continue
+
         if (pane_id in armed and wall["status"] == "waiting"
                 and now >= wall["resume_at"]):
             attempt_resume(pane_id, wall, info)
