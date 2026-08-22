@@ -9,7 +9,7 @@ a poll loop can read it, sit out the window, and prod the agent when it opens.
 Two halves:
 
   detect   every claude/codex pane is read each poll; a pane showing a wall
-           gets a countdown badge ($limit) whether or not you armed it. Free
+           gets a countdown badge ($wall) whether or not you armed it. Free
            observability — this is how you notice an agent died at 11:04.
 
   resume   only panes you *armed* are typed into. At the reset time the daemon
@@ -41,8 +41,10 @@ PLUGIN_ID = os.environ.get("HERDR_PLUGIN_ID", "rcosteira.autocontinue")
 HERDR = os.environ.get("HERDR_BIN_PATH", "herdr")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# The fallback has to match the directory herdr itself uses, so a run outside
+# herdr's action runner reads the same state.
 STATE_DIR = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser(
-    "~/.local/state/herdr/autocontinue"
+    os.path.join("~/.local/state/herdr/plugins", PLUGIN_ID)
 )
 CONFIG_DIR = os.environ.get("HERDR_PLUGIN_CONFIG_DIR") or STATE_DIR
 WALLS = os.path.join(STATE_DIR, "walls.json")
@@ -81,7 +83,9 @@ KINDS = [
     if k.strip()
 ]
 
-TOKEN = "limit"
+# Not "limit": senna-lang/herdr-agent-usage already writes a $limit token, and
+# two plugins writing one token would fight over it.
+TOKEN = "wall"
 GLYPH_ARMED = "\N{HOURGLASS WITH FLOWING SAND}"   # ⏳ will be continued
 GLYPH_IDLE = "\N{DOUBLE VERTICAL BAR}"            # ⏸ seen, not armed
 GLYPH_GAVEUP = "\N{WARNING SIGN}"                 # ⚠ gave up
@@ -626,6 +630,7 @@ def cmd_start(argv):
         print(f"autocontinue: watching (log: {LOGFILE})")
     else:
         print(f"autocontinue: already running (pid {_read_pid()})")
+    warn_if_unwired()
     return 0
 
 
@@ -869,8 +874,296 @@ def cmd_ui(argv):
     return 0
 
 
+# ---- sidebar wiring -------------------------------------------------------
+
+SIDEBAR_TABLE = "[ui.sidebar.agents]"
+OVERRIDE_TABLE = "[ui.sidebar.agents.rows_by_agent]"
+DEFAULT_ROWS = '[["state_icon", "workspace", "tab"], ["agent"]]'
+CONFIG_BACKUP_DIR = os.path.join(STATE_DIR, "config-backups")
+NAG_MARKER = os.path.join(STATE_DIR, ".sidebar-nagged")
+_HEADER_RE = re.compile(r"\[\[?[^\[\]]+\]\]?\s*(#.*)?$")
+
+
+def config_path():
+    sock = os.environ.get("HERDR_SOCKET_PATH")
+    if sock:
+        guess = os.path.join(os.path.dirname(sock), "config.toml")
+        if os.path.exists(guess):
+            return guess
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "herdr", "config.toml")
+
+
+def _uncommented(text):
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+
+def _token_wired(text):
+    return '"${}"'.format(TOKEN) in _uncommented(text)
+
+
+def _match_brackets(text, i):
+    while i < len(text) and text[i] != "[":
+        if not text[i].isspace():
+            return None
+        i += 1
+    depth = 0
+    while i < len(text):
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _find_value(text, header, key):
+    """Offsets of the `key = [...]` array inside `header`, or None.
+
+    Bracket depth is tracked so a row line such as `["agent"],` inside a
+    multi-line value is never mistaken for the next table header.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            break
+    if start is None:
+        return None
+    offset = sum(len(l) for l in lines[: start + 1])
+    depth = 0
+    for line in lines[start + 1 :]:
+        if depth == 0:
+            if _HEADER_RE.match(line.strip()):
+                return None
+            match = re.match(r"\s*%s\s*=\s*" % re.escape(key), line)
+            if match:
+                vstart = offset + match.end()
+                vend = _match_brackets(text, vstart)
+                return None if vend is None else (vstart, vend)
+        depth += line.count("[") - line.count("]")
+        offset += len(line)
+    return None
+
+
+def _append_token(value):
+    depth = 0
+    inner_open = None
+    for i, ch in enumerate(value):
+        if ch == "[":
+            depth += 1
+            if depth == 2:
+                inner_open = i
+        elif ch == "]":
+            if depth == 2 and inner_open is not None:
+                inner = value[inner_open + 1 : i].strip()
+                sep = ", " if inner else ""
+                return value[:i].rstrip() + '%s"$%s"' % (sep, TOKEN) + value[i:]
+            depth -= 1
+    return None
+
+
+def _drop_token(value):
+    """Remove every "$TOKEN" entry from a rows array, or None if absent."""
+    quoted = '"$%s"' % TOKEN
+    if quoted not in value:
+        return None
+    out = re.sub(r",\s*" + re.escape(quoted), "", value)
+    out = re.sub(re.escape(quoted) + r"\s*,\s*", "", out)
+    out = out.replace(quoted, "")
+    return out
+
+
+def _valid_toml(text):
+    """False only when tomllib is present and rejects the text."""
+    try:
+        import tomllib
+    except ImportError:
+        return True  # too old to check; the caller still keeps a backup
+    try:
+        tomllib.loads(text)
+        return True
+    except Exception:
+        return False
+
+
+def _stripped_config(text, kinds):
+    """(new text, [what changed]) on success, else (None, reason)."""
+    if not _token_wired(text):
+        return None, "already"
+    out, changed = text, []
+    for header, key in (
+        [(SIDEBAR_TABLE, "rows")] + [(OVERRIDE_TABLE, k) for k in kinds]
+    ):
+        span = _find_value(out, header, key)
+        if not span:
+            continue
+        dropped = _drop_token(out[span[0] : span[1]])
+        if dropped is None:
+            continue
+        out = out[: span[0]] + dropped + out[span[1] :]
+        changed.append("rows" if key == "rows" else "rows_by_agent.%s" % key)
+    if not changed:
+        return None, "unparsed"
+    return out, changed
+
+
+def _merged_config(text, kinds):
+    """(new text, [what changed]) on success, else (None, reason).
+
+    An override in rows_by_agent replaces rows rather than extending it, so a
+    kind listed there needs the token merged into its own layout too.
+    """
+    if _token_wired(text):
+        return None, "already"
+    out, changed = text, []
+    span = _find_value(out, SIDEBAR_TABLE, "rows")
+    if span:
+        merged = _append_token(out[span[0] : span[1]])
+        if merged is None:
+            return None, "unparsed"
+        out = out[: span[0]] + merged + out[span[1] :]
+        changed.append("rows")
+    elif SIDEBAR_TABLE in _uncommented(out):
+        return None, "unparsed"
+    else:
+        block = "%s\nrows = %s\n" % (SIDEBAR_TABLE, _append_token(DEFAULT_ROWS))
+        out = out.rstrip("\n") + "\n\n" + block
+        changed.append("rows (new table)")
+    for kind in kinds:
+        span = _find_value(out, OVERRIDE_TABLE, kind)
+        if not span:
+            continue
+        merged = _append_token(out[span[0] : span[1]])
+        if merged is None:
+            continue
+        out = out[: span[0]] + merged + out[span[1] :]
+        changed.append("rows_by_agent.%s" % kind)
+    return out, changed
+
+
+def sidebar_snippet():
+    return "%s\nrows = %s" % (SIDEBAR_TABLE, _append_token(DEFAULT_ROWS))
+
+
+def _rewrite_config(edit, kinds, done_word):
+    """Apply `edit` to config.toml, backing the original up first.
+
+    Returns (status, where, what changed). The edited text is parsed before it
+    replaces anything, so a bad edit is refused rather than written.
+    """
+    path = config_path()
+    if not os.path.exists(path):
+        return "missing", path, []
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    out, info = edit(text, kinds)
+    if out is None:
+        return info, path, []
+    if not _valid_toml(out):
+        return "unparsed", path, []
+    os.makedirs(CONFIG_BACKUP_DIR, exist_ok=True)
+    backup = os.path.join(CONFIG_BACKUP_DIR, "config.toml.%d" % int(time.time()))
+    with open(backup, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    tmp = "%s.autocontinue-tmp" % path
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(out)
+    os.replace(tmp, path)
+    herdr("server", "reload-config")
+    return done_word, backup, info
+
+
+def wire_sidebar(kinds):
+    """Merge $TOKEN into the sidebar rows, keeping a backup of the original."""
+    return _rewrite_config(_merged_config, kinds, "wired")
+
+
+def unwire_sidebar(kinds):
+    """Remove $TOKEN from the sidebar rows, keeping a backup of the original."""
+    return _rewrite_config(_stripped_config, kinds, "unwired")
+
+
+def warn_if_unwired():
+    """A token nothing references renders nothing, and herdr reports no error.
+
+    Startup says so once rather than editing config behind your back.
+    """
+    try:
+        if os.path.exists(NAG_MARKER):
+            return
+        path = config_path()
+        if not os.path.exists(path):
+            return
+        with open(path, encoding="utf-8") as handle:
+            if _token_wired(handle.read()):
+                return
+        herdr(
+            "notification", "show", "Auto-continue: badge not visible",
+            "--body",
+            "No sidebar row names $%s. Run the enable-badge action to add it."
+            % TOKEN,
+            "--sound", "none",
+        )
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(NAG_MARKER, "w", encoding="utf-8") as handle:
+            handle.write("")
+    except Exception:
+        pass
+
+
+def cmd_enable_badge(argv):
+    status, where, info = wire_sidebar(KINDS)
+    if status == "wired":
+        print("wired $%s into %s (%s)" % (TOKEN, config_path(), ", ".join(info)))
+        print("backup: %s" % where)
+        print("config reloaded")
+    elif status == "already":
+        print("$%s is already named in the sidebar rows — nothing to do." % TOKEN)
+    elif status == "missing":
+        print("no herdr config at %s\n\nadd:\n\n%s" % (where, sidebar_snippet()))
+        return 1
+    else:
+        print(
+            "could not edit %s safely — add $%s by hand:\n\n%s"
+            % (where, TOKEN, sidebar_snippet())
+        )
+        return 1
+    return 0
+
+
+def cmd_disable_badge(argv):
+    """Stop showing the countdown badge: leave the rows, then clear the panes."""
+    status, where, info = unwire_sidebar(KINDS)
+    agents = live_agents() or {}
+    for pane_id in agents:
+        clear_badge(pane_id)
+    if status == "unwired":
+        print("removed $%s from %s (%s)" % (TOKEN, config_path(), ", ".join(info)))
+        print("backup: %s" % where)
+        print("cleared the badge from %d pane(s); config reloaded" % len(agents))
+    elif status == "already":
+        print("$%s is not named in the sidebar rows — nothing to remove." % TOKEN)
+        print("cleared the badge from %d pane(s)" % len(agents))
+    elif status == "missing":
+        print("no herdr config at %s" % where)
+        return 1
+    else:
+        print(
+            "could not edit %s safely — remove \"$%s\" from the rows by hand"
+            % (where, TOKEN)
+        )
+        return 1
+    return 0
+
+
 DISPATCH = {
     "start": cmd_start,
+    "enable-badge": cmd_enable_badge,
+    "disable-badge": cmd_disable_badge,
     "stop": cmd_stop,
     "status": cmd_status,
     "arm": cmd_arm,

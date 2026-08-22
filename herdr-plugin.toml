@@ -2,13 +2,28 @@ id = "rcosteira.autocontinue"
 name = "Auto Continue"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
-description = "Watches agents for usage-limit walls, badges the countdown to the reset ($limit), and re-prompts the agents you armed once the window reopens."
+description = "Watches agents for usage-limit walls, badges the countdown to the reset ($wall), and re-prompts the agents you armed once the window reopens."
 platforms = ["macos", "linux"]
 
 # Bring the watcher back up after a restart / live handoff. Armed panes are
 # keyed by pane id, so a session restore keeps its arming.
 [[startup]]
 command = ["python3", "autocontinue.py", "start"]
+
+# Add $wall to the sidebar rows, so the badge is actually rendered. Backs the
+# config up first and reloads the server. Startup only warns; this one writes.
+[[actions]]
+id = "enable-badge"
+title = "Auto-continue: add the $wall badge to the sidebar"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "enable-badge"]
+
+# The reverse: take $wall out of the rows and clear it off the panes.
+[[actions]]
+id = "disable-badge"
+title = "Auto-continue: remove the $wall badge from the sidebar"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "disable-badge"]
 
 # Arm/disarm the focused agent. Nothing is ever typed into a pane that is not
 # armed, so this is the plugin's main switch — bind it to a key (see README).

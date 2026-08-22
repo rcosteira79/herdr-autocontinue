@@ -12,7 +12,7 @@ agent when it is over.
 ## What it does
 
 - **Detect** — every claude/codex pane is read each poll. A pane showing a
-  limit wall gets a countdown badge (`$limit`) whether or not you armed it.
+  limit wall gets a countdown badge (`$wall`) whether or not you armed it.
   This half is pure observability and always on.
 - **Resume** — panes you **armed** get `continue` submitted once the window
   reopens. Nothing is ever typed into a pane you did not arm.
@@ -55,17 +55,31 @@ start --plugin rcosteira.autocontinue` starts it now.
 
 ### Config (`~/.config/herdr/config.toml`)
 
-Two edits. `herdr server reload-config` after any change.
+**1. Show the badge.** `$wall` is a pane token, and a token renders only if a
+sidebar row names it. Installing a plugin does not edit your config, so until
+some row names `$wall`, the badge is invisible and herdr reports no error. The
+`enable-badge` action does that one edit for you:
 
-**1. Show the badge** — `$limit` is a pane token, and tokens only render if a
-sidebar row references them:
+```sh
+herdr plugin action invoke enable-badge --plugin rcosteira.autocontinue
+```
+
+It backs `config.toml` up first, merges `$wall` into the rows you already have
+(and into any `rows_by_agent` override for claude/codex, since an override
+replaces `rows` rather than extending it), then reloads the server. Run it
+twice and the second run does nothing. To do it by hand instead:
 
 ```toml
 [ui.sidebar.agents]
-rows = [["state_icon", "workspace", "tab", "$limit"], ["agent"]]
+rows = [["state_icon", "workspace", "tab", "$wall"], ["agent"]]
 ```
 
-**2. Keybindings**:
+The watcher checks this at startup and posts one notification if the token is
+unreferenced. It never edits the config on its own — that only happens when you
+invoke `enable-badge`. It touches the sidebar row only — it does not arm, disarm
+or resume anything. That is `arm` and the list, under `open-list`.
+
+**2. Keybindings** — `herdr server reload-config` after editing these:
 
 ```toml
 [[keys.command]]
@@ -127,7 +141,10 @@ also where you arm them.
   re-checked every `AUTOCONTINUE_BLIND_RETRY_MIN` instead.
 - Resume: `herdr agent prompt <pane> "continue"`, which submits atomically with
   Enter. Retry delays are 5m, 15m, 45m, then hourly.
-- Badges: `herdr pane report-metadata --token limit=…` with a TTL of four polls.
+- Badges: `herdr pane report-metadata --token wall=…` with a TTL of four polls.
+  The token is `wall`, not `limit`, because `senna-lang/herdr-agent-usage`
+  already writes `$limit`; two plugins writing one token would overwrite each
+  other.
 
 ## Fragility
 
