@@ -338,3 +338,11 @@ what it *would* have submitted before you let it type.
 - herdr ≥ 0.8.0 (for the `[[startup]]` autostart)
 - Python 3 (stdlib only; uses `curses` for the overlay)
 - macOS or Linux
+
+## The other herdr plugins
+
+Each installs on its own; they share nothing but an author.
+
+- [**herdr-idle-shell-badge**](https://github.com/rcosteira79/herdr-idle-shell-badge) — Badges idle agents that still have a background shell running, so one that *looks* done but left a process alive isn't mistaken for finished.
+- [**herdr-readpending**](https://github.com/rcosteira79/herdr-readpending) — Mark agents you started reading but haven't finished — a numbered badge plus a reorderable overlay queue that clears when you focus the agent.
+- [**herdr-account-switch**](https://github.com/rcosteira79/herdr-account-switch) — Hot-swap Claude Code / Codex logins without re-authenticating, with what is left on each account in the picker.
