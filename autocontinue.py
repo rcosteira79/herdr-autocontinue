@@ -476,18 +476,36 @@ def drop_wall(pane_id, why):
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_BETA = "oauth-2025-04-20"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_CACHE = os.path.join(STATE_DIR, "usage.json")
 USAGE_TTL_S = _num("AUTOCONTINUE_USAGE_TTL_S", 180.0)
 USAGE_MIN_GAP_S = _num("AUTOCONTINUE_USAGE_MIN_GAP_S", 30.0)
 USAGE_TIMEOUT_S = _num("AUTOCONTINUE_USAGE_TIMEOUT_S", 5.0)
+# How long to leave an account alone after it answers 429.
+USAGE_BACKOFF_S = _num("AUTOCONTINUE_USAGE_BACKOFF_S", 900.0)
 USE_ACCOUNT = _flag("AUTOCONTINUE_USE_ACCOUNT", default=True)
-# Kinds billed to the Claude account. A codex pane is not, so an exhausted
-# Claude account says nothing about it.
-ACCOUNT_KINDS = [
-    k.strip().lower()
-    for k in os.environ.get("AUTOCONTINUE_ACCOUNT_KINDS", "claude,omp").split(",")
-    if k.strip()
-]
+
+
+def _kind_providers():
+    """kind -> which account pays for it.
+
+    An exhausted Claude account says nothing about a codex pane, so the two
+    are asked separately. A kind absent from this map has no account to ask and
+    falls back to the text rules alone.
+    """
+    out = {}
+    for provider, default in (("claude", "claude,omp"), ("codex", "codex")):
+        raw = os.environ.get(
+            "AUTOCONTINUE_%s_KINDS" % provider.upper(), default)
+        for kind in raw.split(","):
+            if kind.strip():
+                out[kind.strip().lower()] = provider
+    return out
+
+
+KIND_PROVIDER = _kind_providers()
+# Every kind that has an account behind it.
+ACCOUNT_KINDS = sorted(KIND_PROVIDER)
 # A window at or above this percent counts as spent. Severity strings other
 # than "normal" are logged rather than trusted: the only value seen in the
 # wild so far is "normal", so a guessed name could block on a mere warning.
@@ -523,81 +541,168 @@ def _oauth_token():
         return None
 
 
-def _iso_to_epoch(text):
-    if not text:
+def _iso_to_epoch(value):
+    """Epoch seconds from either an ISO string or an already-numeric stamp.
+
+    Claude answers with ISO text, codex with a unix number.
+    """
+    if not value:
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
     try:
-        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
 
 
-def _fetch_usage():
-    token = _oauth_token()
-    if not token:
-        return None
-    request = urllib.request.Request(
-        USAGE_URL,
-        headers={"Authorization": "Bearer %s" % token,
-                 "anthropic-beta": USAGE_BETA},
-    )
+def _codex_auth():
+    """(token, account_id) from the store the codex CLI reads."""
+    base = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    try:
+        with open(os.path.join(base, "auth.json"), encoding="utf-8") as fh:
+            tokens = (json.load(fh).get("tokens") or {})
+        return tokens.get("access_token"), tokens.get("account_id")
+    except Exception:
+        return None, None
+
+
+def _get_json(url, headers):
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=USAGE_TIMEOUT_S) as response:
         return json.load(response)
 
 
-def usage_windows(force=False):
-    """[{kind, percent, severity, resets_at}] for the account, newest cached.
+def _fetch_usage(provider):
+    if provider == "claude":
+        token = _oauth_token()
+        if not token:
+            return None
+        return _get_json(USAGE_URL, {
+            "Authorization": "Bearer %s" % token,
+            "anthropic-beta": USAGE_BETA,
+        })
+    if provider == "codex":
+        token, account_id = _codex_auth()
+        if not token:
+            return None
+        return _get_json(CODEX_USAGE_URL, {
+            "Authorization": "Bearer %s" % token,
+            "chatgpt-account-id": account_id or "",
+            "User-Agent": "codex-cli",
+            "Accept": "application/json",
+        })
+    return None
 
-    Cached on disk and shared by every pane in the poll, so a ten-second loop
-    over seventeen panes still asks the account at most once per USAGE_MIN_GAP_S.
-    """
-    if not USE_ACCOUNT:
-        return []
-    now = time.time()
-    cached = _load(USAGE_CACHE, {})
-    fetched_at = cached.get("fetched_at") or 0
-    fresh = (now - fetched_at) < USAGE_TTL_S
-    if cached.get("windows") is not None and fresh and not force:
-        return cached["windows"]
-    if (now - (cached.get("tried_at") or 0)) < USAGE_MIN_GAP_S and not force:
-        return cached.get("windows") or []
-    cached["tried_at"] = now
-    _save(USAGE_CACHE, cached)
-    try:
-        body = _fetch_usage()
-    except Exception as exc:
-        log("usage api: %s" % exc)
-        return cached.get("windows") or []
-    if not isinstance(body, dict):
-        return cached.get("windows") or []
+
+def _codex_windows(body):
+    """Codex says outright whether it is blocked, so nothing is inferred."""
+    rate = (body or {}).get("rate_limit") or {}
+    reached = rate.get("limit_reached")
+    out = []
+    for name in ("primary_window", "secondary_window"):
+        window = rate.get(name)
+        if not isinstance(window, dict):
+            continue
+        seconds = window.get("limit_window_seconds") or 0
+        resets = window.get("reset_at")
+        if resets is None and window.get("reset_after_seconds") is not None:
+            resets = time.time() + window["reset_after_seconds"]
+        out.append({
+            "kind": "%gh" % round(seconds / 3600.0, 1) if seconds else name,
+            "group": name,
+            "percent": window.get("used_percent"),
+            "severity": "",
+            "resets_at": _iso_to_epoch(resets),
+            "blocked": bool(reached) if reached is not None else None,
+        })
+    return out
+
+
+def _claude_windows(body):
     windows = []
     for entry in body.get("limits") or []:
         if not isinstance(entry, dict):
             continue
+        # "weekly_scoped" says nothing on its own; the scope names the model.
+        kind = entry.get("kind")
+        model = ((entry.get("scope") or {}).get("model") or {}).get("display_name")
         windows.append({
-            "kind": entry.get("kind"),
+            "kind": "%s %s" % (str(kind).replace("_scoped", ""), model) if model else kind,
             "group": entry.get("group"),
             "percent": entry.get("percent"),
             "severity": (entry.get("severity") or "").lower(),
             "resets_at": _iso_to_epoch(entry.get("resets_at")),
+            "blocked": None,
         })
-    if not windows:
-        # Older/other shape: the named windows carry the same two numbers.
-        for name in ("five_hour", "seven_day"):
-            block = body.get(name)
-            if isinstance(block, dict):
-                windows.append({
-                    "kind": name,
-                    "group": name,
-                    "percent": block.get("utilization"),
-                    "severity": "",
-                    "resets_at": _iso_to_epoch(block.get("resets_at")),
-                })
-    _save(USAGE_CACHE, {"fetched_at": now, "tried_at": now, "windows": windows})
+    if windows:
+        return windows
+    # Older/other shape: the named windows carry the same two numbers.
+    for name in ("five_hour", "seven_day"):
+        block = body.get(name)
+        if isinstance(block, dict):
+            windows.append({
+                "kind": name,
+                "group": name,
+                "percent": block.get("utilization"),
+                "severity": "",
+                "resets_at": _iso_to_epoch(block.get("resets_at")),
+                "blocked": None,
+            })
+    return windows
+
+
+def usage_windows(provider="claude", force=False):
+    """Windows for one provider's account, newest cached.
+
+    Cached on disk per provider and shared by every pane in the poll, so a
+    ten-second loop over seventeen panes still asks each account at most once
+    per USAGE_MIN_GAP_S.
+    """
+    if not USE_ACCOUNT or not provider:
+        return []
+    now = time.time()
+    store = _load(USAGE_CACHE, {})
+    # The cache used to hold one account's windows at the top level. Drop that
+    # shape rather than leaving its keys sitting beside the per-provider ones.
+    if "windows" in store or "fetched_at" in store:
+        store = {}
+    cached = store.get(provider) or {}
+    fetched_at = cached.get("fetched_at") or 0
+    if cached.get("windows") is not None and (now - fetched_at) < USAGE_TTL_S and not force:
+        return cached["windows"]
+    if (now - (cached.get("tried_at") or 0)) < USAGE_MIN_GAP_S and not force:
+        return cached.get("windows") or []
+    cached["tried_at"] = now
+    store[provider] = cached
+    _save(USAGE_CACHE, store)
+    try:
+        body = _fetch_usage(provider)
+    except Exception as exc:
+        # A 429 means asked too often, so retrying on the usual gap only digs
+        # in. Sit the account out and keep serving the last answer.
+        if getattr(exc, "code", None) == 429:
+            cached["tried_at"] = now + USAGE_BACKOFF_S - USAGE_MIN_GAP_S
+            store[provider] = cached
+            _save(USAGE_CACHE, store)
+            log("usage api (%s): rate limited, resting %ds"
+                % (provider, int(USAGE_BACKOFF_S)))
+        else:
+            log("usage api (%s): %s" % (provider, exc))
+        return cached.get("windows") or []
+    if not isinstance(body, dict):
+        return cached.get("windows") or []
+    windows = (_codex_windows(body) if provider == "codex"
+               else _claude_windows(body))
+    store[provider] = {"fetched_at": now, "tried_at": now, "windows": windows}
+    _save(USAGE_CACHE, store)
     return windows
 
 
 def _spent(window):
+    # Codex reports it outright; nothing else has to be inferred for it.
+    if window.get("blocked") is not None:
+        return bool(window["blocked"])
     percent = window.get("percent")
     severity = window.get("severity") or ""
     if severity and severity != "normal" and severity in ACCOUNT_SEVERITIES:
@@ -605,9 +710,13 @@ def _spent(window):
     return isinstance(percent, (int, float)) and percent >= ACCOUNT_PERCENT
 
 
-def account_block():
-    """(resets_at, kind, percent) for a spent window, else None."""
-    spent = [w for w in usage_windows() if _spent(w) and w.get("resets_at")]
+def account_block(kind=None):
+    """(resets_at, window, percent) for a spent window of that kind's account."""
+    provider = KIND_PROVIDER.get(kind) if kind else "claude"
+    if not provider:
+        return None
+    spent = [w for w in usage_windows(provider)
+             if _spent(w) and w.get("resets_at")]
     if not spent:
         return None
     soonest = min(spent, key=lambda w: w["resets_at"])
@@ -615,10 +724,11 @@ def account_block():
 
 
 def account_reset_for(kind):
-    """The soonest reset the account knows about, for filling in a blank time."""
-    if kind and ACCOUNT_KINDS and kind not in ACCOUNT_KINDS:
+    """The soonest reset that kind's account knows about, for a blank time."""
+    provider = KIND_PROVIDER.get(kind)
+    if not provider:
         return None
-    times = [w["resets_at"] for w in usage_windows() if w.get("resets_at")]
+    times = [w["resets_at"] for w in usage_windows(provider) if w.get("resets_at")]
     return min(times) if times else None
 
 
@@ -843,7 +953,9 @@ def tick(agents, pending):
             log("disarmed %s (pane gone for %d polls)"
                 % (", ".join(sorted(dead)), ABSENT_POLLS))
 
-    if ROTATE_PROFILES and not account_block():
+    # Rotation only ever moves claude accounts, so it is that account's
+    # recovery that resets the list.
+    if ROTATE_PROFILES and not account_block("claude"):
         clear_rotation_state()
 
     for pane_id, info in agents.items():
@@ -865,7 +977,7 @@ def tick(agents, pending):
         if hit is None and kind in ACCOUNT_KINDS:
             # No wording matched, but the account itself is out. Every pane
             # billed to it is stuck whatever its harness prints on screen.
-            spent = account_block()
+            spent = account_block(kind)
             if spent:
                 resets_at, window, percent = spent
                 hit = (
@@ -903,7 +1015,7 @@ def tick(agents, pending):
         # bills to is spent. A switch is machine-wide, so an unarmed pane never
         # triggers one.
         if (pane_id in armed and wall["status"] == "waiting"
-                and kind in ACCOUNT_KINDS and account_block()
+                and kind in ACCOUNT_KINDS and account_block(kind)
                 and rotate_account(kind)):
             # The account we just moved to may be spent as well. Prompting is
             # how that shows: the wall returns and the next profile is tried.

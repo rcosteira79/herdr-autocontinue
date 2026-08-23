@@ -127,7 +127,8 @@ also where you arm them.
 | `AUTOCONTINUE_READ_LINES` | `60` | rows read from each pane per poll |
 | `AUTOCONTINUE_KINDS` | *(empty)* | kinds to watch; empty means every kind herdr detects |
 | `AUTOCONTINUE_USE_ACCOUNT` | `1` | ask the account when its window reopens |
-| `AUTOCONTINUE_ACCOUNT_KINDS` | `claude,omp` | kinds billed to the Claude account |
+| `AUTOCONTINUE_CLAUDE_KINDS` | `claude,omp` | kinds billed to the Claude account |
+| `AUTOCONTINUE_CODEX_KINDS` | `codex` | kinds billed to the ChatGPT account |
 | `AUTOCONTINUE_ACCOUNT_PERCENT` | `100` | percent at which a window counts as spent |
 | `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
 | `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
@@ -167,43 +168,59 @@ also where you arm them.
 ## The account as a second signal
 
 A usage limit belongs to the **account**, not to the pane. Every harness signed
-into the same Claude account shares one window. So the account can be asked when
-that window reopens, instead of reading it off a screen:
+into the same account shares one window. So the account can be asked when that
+window reopens, instead of reading it off a screen. Both providers answer:
 
 ```
-GET https://api.anthropic.com/api/oauth/usage
+GET https://api.anthropic.com/api/oauth/usage        # claude, omp
 Authorization: Bearer <token>      # the same credential store the CLI reads
 anthropic-beta: oauth-2025-04-20
+
+GET https://chatgpt.com/backend-api/wham/usage       # codex
+Authorization: Bearer <token>      # from ~/.codex/auth.json
+chatgpt-account-id: <account id>
 ```
 
-It answers with a `limits` list — `kind`, `percent`, `severity`, `resets_at`:
+Claude answers with a `limits` list — `kind`, `percent`, `severity`, `resets_at`:
 
 ```
 session         percent=  0   severity=normal   resets 2026-08-22T23:09:59Z
 weekly_all      percent= 61   severity=normal   resets 2026-08-27T13:59:59Z
-weekly_scoped   percent=  6   severity=normal   resets 2026-08-27T13:59:59Z
 ```
 
+Codex answers with `rate_limit`, and it is the better of the two: alongside
+`used_percent` and `reset_at` it states `limit_reached` outright, so for codex
+nothing has to be inferred from a percentage at all.
+
 This matters because it is **wording-free**. A harness nobody has written a rule
-for still gets detected and resumed, as long as it bills to the account. That is
-what makes the plugin work beyond Claude Code.
+for still gets detected and resumed, as long as it bills to one of these
+accounts. That is what makes the plugin work beyond Claude Code.
 
 It is used two ways:
 
 - **Filling in a blank time.** A wall whose message names no time takes the
   account's reset instead of a blind retry.
-- **Detecting a wall at all.** For a kind in `AUTOCONTINUE_ACCOUNT_KINDS`, a
-  spent window is itself the wall, whatever the screen says.
+- **Detecting a wall at all.** For a kind with an account behind it, a spent
+  window is itself the wall, whatever the screen says.
 
-`AUTOCONTINUE_ACCOUNT_KINDS` defaults to `claude,omp` — the kinds billed to a
-Claude account. `codex` is deliberately absent: it bills elsewhere, so an
-exhausted Claude account says nothing about it. Add your own harness to that
-list, and it inherits the whole mechanism with no rule to write.
+Which account pays for which kind is a map, because they are asked separately —
+an exhausted Claude account says nothing about a codex pane:
 
-A window counts as spent at `AUTOCONTINUE_ACCOUNT_PERCENT` (default `100`).
-`severity` is read and logged but not trusted, because the only value seen so
-far is `normal` — a guessed name could stop the fleet on a mere warning. Once
-you have seen the real one, name it in `AUTOCONTINUE_ACCOUNT_SEVERITIES`.
+| var | default | meaning |
+|-----|---------|---------|
+| `AUTOCONTINUE_CLAUDE_KINDS` | `claude,omp` | kinds billed to the Claude account |
+| `AUTOCONTINUE_CODEX_KINDS` | `codex` | kinds billed to the ChatGPT account |
+
+Add your own harness to whichever line pays for it, and it inherits the whole
+mechanism with no rule to write. A kind on neither line falls back to the text
+rules alone.
+
+A claude window counts as spent at `AUTOCONTINUE_ACCOUNT_PERCENT` (default
+`100`). `severity` is read and logged but not trusted, because the only value
+seen so far is `normal` — a guessed name could stop the fleet on a mere warning.
+Once you have seen the real one, name it in `AUTOCONTINUE_ACCOUNT_SEVERITIES`.
+Codex needs none of this: it reports `limit_reached` directly, and that boolean
+wins over any percentage.
 
 The endpoint is unofficial and can change or vanish. Everything here fails soft:
 no token, no network, or an unrecognised shape all fall back to the text rules,
