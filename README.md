@@ -47,10 +47,10 @@ TTL, so if the daemon dies they expire instead of lying to you.
 ## Install
 
 ```sh
-herdr plugin install rcosteira79/herdr-plugins/autocontinue
+herdr plugin install rcosteira79/herdr-autocontinue
 ```
 
-Or link a local checkout: `herdr plugin link /path/to/herdr-plugins/autocontinue`.
+Or link a local checkout: `herdr plugin link /path/to/herdr-autocontinue`.
 Re-run `install`/`link` after a `herdr update` — updates drop plugins.
 
 The watcher starts itself on the next herdr start; `herdr plugin action invoke
@@ -267,7 +267,7 @@ ten-second loop over seventeen panes is still one request every three minutes.
 
 ## Rotating to another account
 
-If [account-switch](../account-switch) is installed, a spent account can hand
+If [account-switch](https://github.com/rcosteira79/herdr-account-switch) is installed, a spent account can hand
 over to another one you have saved, instead of everything waiting for the
 window to reopen. **This is off until you name the profiles it may use:**
 
