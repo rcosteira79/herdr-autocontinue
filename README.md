@@ -124,10 +124,18 @@ $(herdr plugin config-dir rcosteira.autocontinue)/config.toml
 ```
 
 ```toml
+# What gets typed into an armed agent once its window reopens.
 prompt = "continue"
+
+# How often every pane is read, in seconds.
 poll_s = 10
-rotate_profiles = ["spare"]      # rotation stays off while this is empty
+
+# account-switch profiles rotation may move to. Empty means it never does.
+rotate_profiles = []
+
+# Which agent kinds bill to which account, so the right one is asked.
 claude_kinds = ["claude", "omp"]
+codex_kinds = ["codex"]
 ```
 
 The key is the variable below without its `AUTOCONTINUE_` prefix, lowercased.
@@ -263,9 +271,16 @@ If [account-switch](../account-switch) is installed, a spent account can hand
 over to another one you have saved, instead of everything waiting for the
 window to reopen. **This is off until you name the profiles it may use:**
 
+In `config.toml`, name the **account-switch profiles** it is allowed to move
+to. These are the names you gave them when you saved them — the ones `s` in the
+picker prompted for, and the ones `herdr plugin action invoke status --plugin
+rcosteira.account-switch` lists:
+
 ```toml
-# $(herdr plugin config-dir rcosteira.autocontinue)/config.toml
-rotate_profiles = ["spare", "overflow"]
+# Profiles rotation may switch to, in the order it tries them. These are
+# account-switch profile names, not agent kinds and not email addresses.
+# Whatever is live at the time is skipped; so is anything not named here.
+rotate_profiles = ["personal-max", "team-overflow"]
 ```
 
 Only profiles on that list are ever switched to. There is no "any profile"
