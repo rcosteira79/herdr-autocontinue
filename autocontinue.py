@@ -57,24 +57,78 @@ LOGFILE = os.path.join(STATE_DIR, "autocontinue.log")
 LOG_MAX_BYTES = 512 * 1024
 
 
+PREFIX = "AUTOCONTINUE_"
+
+
+def _load_settings():
+    """Settings from the plugin's own config dir.
+
+    Actions inherit the herdr server's environment, so an environment variable
+    can only be set by restarting herdr with it exported. A file in the config
+    dir is the one place a person can actually change these.
+    """
+    for name in ("config.toml", "config.json"):
+        path = os.path.join(CONFIG_DIR, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            if name.endswith(".toml"):
+                import tomllib
+                with open(path, "rb") as handle:
+                    return tomllib.load(handle)
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            continue  # a broken config must not stop the watcher
+    return {}
+
+
+SETTINGS = _load_settings()
+
+
+def _setting(name):
+    """The environment first, then the config file, then nothing.
+
+    The config key is the variable without its prefix, lowercased:
+    AUTOCONTINUE_POLL_S is `poll_s`.
+    """
+    if name in os.environ:
+        return os.environ[name]
+    key = name[len(PREFIX):].lower() if name.startswith(PREFIX) else name.lower()
+    return SETTINGS.get(key)
+
+
 def _num(name, default, cast=float):
+    value = _setting(name)
     try:
-        return cast(os.environ[name])
-    except (KeyError, ValueError):
+        return cast(value)
+    except (TypeError, ValueError):
         return default
 
 
 def _flag(name, default=False):
-    raw = os.environ.get(name)
-    if raw is None:
+    value = _setting(name)
+    if value is None:
         return default
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _list(name, default=""):
+    """A comma-separated variable, or a real list when it came from TOML."""
+    value = _setting(name)
+    if value is None:
+        value = default
+    if isinstance(value, str):
+        value = value.split(",")
+    return [str(v).strip().lower() for v in value if str(v).strip()]
 
 
 POLL_S = _num("AUTOCONTINUE_POLL_S", 10.0)
 TAIL_LINES = _num("AUTOCONTINUE_TAIL_LINES", 15, int)
 READ_LINES = _num("AUTOCONTINUE_READ_LINES", 60, int)
-PROMPT_TEXT = os.environ.get("AUTOCONTINUE_PROMPT", "continue")
+PROMPT_TEXT = _setting("AUTOCONTINUE_PROMPT") or "continue"
 GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
@@ -84,22 +138,18 @@ DRY_RUN = _flag("AUTOCONTINUE_DRY_RUN")
 IS_MAC = platform.system() == "Darwin"
 
 # Empty means "every kind herdr detects". Name kinds here to narrow it.
-KINDS = [
-    k.strip().lower()
-    for k in os.environ.get("AUTOCONTINUE_KINDS", "").split(",")
-    if k.strip()
-]
+KINDS = _list("AUTOCONTINUE_KINDS")
 
 # Not "limit": senna-lang/herdr-agent-usage already writes a $limit token, and
 # two plugins writing one token would fight over it.
 TOKEN = "wall"
-GLYPH_ARMED = os.environ.get("AUTOCONTINUE_GLYPH_ARMED") or (
+GLYPH_ARMED = _setting("AUTOCONTINUE_GLYPH_ARMED") or (
     "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS}"  # 🔄 will resume
 )
-GLYPH_IDLE = os.environ.get("AUTOCONTINUE_GLYPH_SEEN") or (
+GLYPH_IDLE = _setting("AUTOCONTINUE_GLYPH_SEEN") or (
     "\N{DOUBLE VERTICAL BAR}"                     # ⏸ seen, not armed
 )
-GLYPH_GAVEUP = os.environ.get("AUTOCONTINUE_GLYPH_GAVEUP") or (
+GLYPH_GAVEUP = _setting("AUTOCONTINUE_GLYPH_GAVEUP") or (
     "\N{WARNING SIGN}"                            # ⚠ gave up
 )
 TTL_MS = int(POLL_S * 4 * 1000)
@@ -495,11 +545,8 @@ def _kind_providers():
     """
     out = {}
     for provider, default in (("claude", "claude,omp"), ("codex", "codex")):
-        raw = os.environ.get(
-            "AUTOCONTINUE_%s_KINDS" % provider.upper(), default)
-        for kind in raw.split(","):
-            if kind.strip():
-                out[kind.strip().lower()] = provider
+        for kind in _list("AUTOCONTINUE_%s_KINDS" % provider.upper(), default):
+            out[kind] = provider
     return out
 
 
@@ -510,11 +557,7 @@ ACCOUNT_KINDS = sorted(KIND_PROVIDER)
 # than "normal" are logged rather than trusted: the only value seen in the
 # wild so far is "normal", so a guessed name could block on a mere warning.
 ACCOUNT_PERCENT = _num("AUTOCONTINUE_ACCOUNT_PERCENT", 100.0)
-ACCOUNT_SEVERITIES = [
-    s.strip().lower()
-    for s in os.environ.get("AUTOCONTINUE_ACCOUNT_SEVERITIES", "").split(",")
-    if s.strip()
-]
+ACCOUNT_SEVERITIES = _list("AUTOCONTINUE_ACCOUNT_SEVERITIES")
 
 
 def _oauth_token():
@@ -776,11 +819,7 @@ def _backoff(attempts):
 # therefore switches and watches. If the new account is spent too, the wall
 # comes back and the next profile is tried, up to one pass over the list.
 
-ROTATE_PROFILES = [
-    p.strip().lower()
-    for p in os.environ.get("AUTOCONTINUE_ROTATE_PROFILES", "").split(",")
-    if p.strip()
-]
+ROTATE_PROFILES = _list("AUTOCONTINUE_ROTATE_PROFILES")
 ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
 SWITCH_PLUGIN_ID = os.environ.get(

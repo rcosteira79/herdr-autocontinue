@@ -114,7 +114,35 @@ q / esc          close
 Every claude/codex agent is listed, not only the walled ones, because this is
 also where you arm them.
 
-## Config (env)
+## Config
+
+Settings live in a file in the plugin's own config directory, next to
+`patterns.json`:
+
+```sh
+$(herdr plugin config-dir rcosteira.autocontinue)/config.toml
+```
+
+```toml
+prompt = "continue"
+poll_s = 10
+rotate_profiles = ["spare"]      # rotation stays off while this is empty
+claude_kinds = ["claude", "omp"]
+```
+
+The key is the variable below without its `AUTOCONTINUE_` prefix, lowercased.
+`config.json` works too. A file that fails to parse is ignored rather than
+fatal, and the defaults stand. The daemon reads it at startup, so restart the
+watcher after a change:
+
+```sh
+herdr plugin action invoke stop --plugin rcosteira.autocontinue
+herdr plugin action invoke start --plugin rcosteira.autocontinue
+```
+
+An environment variable still wins over the file, but is rarely the practical
+choice: plugin actions and the daemon inherit the **herdr server's**
+environment, so setting one means exporting it before herdr starts.
 
 | var | default | meaning |
 |-----|---------|---------|
@@ -235,8 +263,9 @@ If [account-switch](../account-switch) is installed, a spent account can hand
 over to another one you have saved, instead of everything waiting for the
 window to reopen. **This is off until you name the profiles it may use:**
 
-```sh
-AUTOCONTINUE_ROTATE_PROFILES="spare,overflow"
+```toml
+# $(herdr plugin config-dir rcosteira.autocontinue)/config.toml
+rotate_profiles = ["spare", "overflow"]
 ```
 
 Only profiles on that list are ever switched to. There is no "any profile"
