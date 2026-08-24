@@ -8,9 +8,10 @@ a poll loop can read it, sit out the window, and prod the agent when it opens.
 
 Two halves:
 
-  detect   every claude/codex pane is read each poll; a pane showing a wall
-           gets a countdown badge ($wall) whether or not you armed it. Free
-           observability — this is how you notice an agent died at 11:04.
+  detect   a pane showing a wall gets a countdown badge ($wall) whether or not
+           you armed it. Free observability — this is how you notice an agent
+           died at 11:04. herdr's `pane.agent_status_changed` hook wakes the
+           daemon the moment an agent stops, so the sweep behind it is slow.
 
   resume   only panes you *armed* are typed into. At the reset time the daemon
            re-reads the pane, and if the wall is still there and the agent is
@@ -23,6 +24,7 @@ which state it is in, and nothing is ever typed into a pane you did not arm.
 
 Subcommands:
   start / stop / status   the daemon (also autostarted by the [[startup]] hook)
+  on-status               wake the daemon now (herdr's status-change hook)
   arm                     toggle auto-continue on the focused agent (action)
   scan                    one-shot detection report, writes nothing (debugging)
   open-list / ui          the overlay showing every wall and its countdown
@@ -33,8 +35,10 @@ import json
 import os
 import re
 import platform
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -125,7 +129,13 @@ def _list(name, default=""):
     return [str(v).strip().lower() for v in value if str(v).strip()]
 
 
-POLL_S = _num("AUTOCONTINUE_POLL_S", 10.0)
+# The sweep is a safety net: herdr's status-change hook wakes the daemon the
+# moment an agent stops, which is when a wall can appear. What the hook cannot
+# announce is a time, and half of this plugin is "wake up in three hours".
+POLL_S = _num("AUTOCONTINUE_POLL_S", 60.0)
+# Never tick more often than this, however many events arrive at once. Nineteen
+# panes changing status together is one tick, not nineteen.
+MIN_TICK_S = _num("AUTOCONTINUE_MIN_TICK_S", 2.0)
 TAIL_LINES = _num("AUTOCONTINUE_TAIL_LINES", 15, int)
 READ_LINES = _num("AUTOCONTINUE_READ_LINES", 60, int)
 PROMPT_TEXT = _setting("AUTOCONTINUE_PROMPT") or "continue"
@@ -366,8 +376,16 @@ def _tzinfo(name):
 
 
 def _from_clock(groups):
+    """Epoch for a wall-clock reset time, or None.
+
+    Stays naive when the text names no zone. `datetime.now().astimezone()` pins
+    *today's* UTC offset onto the result, so a target on the far side of a
+    daylight-saving change lands an hour out — "resets Feb 3 at 9am" read in
+    August became 08:00. The conversion happens at the end instead, where the
+    local zone's rules are applied to the target's own date.
+    """
     tz = _tzinfo(groups.get("tz"))
-    now = datetime.now(tz) if tz else datetime.now().astimezone()
+    now = datetime.now(tz) if tz else datetime.now()
     hour = int(groups["hour"])
     minute = int(groups.get("minute") or 0)
     ampm = (groups.get("ampm") or "").replace(".", "").lower()
@@ -394,6 +412,9 @@ def _from_clock(groups):
                 return None
     elif (target - now).total_seconds() < -120:
         target += timedelta(days=1)  # a bare clock time that already passed
+    if target.tzinfo is None:
+        # Local zone, resolved for the target's date rather than for today.
+        target = target.astimezone()
     return target.timestamp()
 
 
@@ -849,11 +870,28 @@ def _switcher_script():
     return None
 
 
+def _switch_env():
+    """Environment for running account-switch's own script.
+
+    The plugin-scoped variables herdr exports name the plugin it invoked, which
+    is this one. Passing them down makes switcher.py treat *autocontinue's*
+    state directory as its own, where it finds no profiles and reports none —
+    so rotation asked for a list, got nothing back, and quietly did nothing.
+    Worse, a switch run that way would write credentials into the wrong
+    directory. Name the other plugin instead and let it resolve its own paths.
+    """
+    env = dict(os.environ)
+    env.pop("HERDR_PLUGIN_STATE_DIR", None)
+    env.pop("HERDR_PLUGIN_CONFIG_DIR", None)
+    env["HERDR_PLUGIN_ID"] = SWITCH_PLUGIN_ID
+    return env
+
+
 def _switch_profiles(script, kind):
     """[(slug, label, is_live)] for a kind, from account-switch's own status."""
     res = subprocess.run(
         ["python3", script, "list", "--kind", kind, "--json"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, env=_switch_env(),
     )
     if res.returncode != 0:
         return []
@@ -900,7 +938,7 @@ def rotate_account(kind):
     target = allowed[0]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, env=_switch_env(),
     )
     if res.returncode != 0:
         log("rotate: switch to %s failed: %s"
@@ -1105,6 +1143,64 @@ def ensure_daemon():
     return True
 
 
+# ---- waking the daemon ----------------------------------------------------
+#
+# herdr's `pane.agent_status_changed` hook runs a separate short-lived process.
+# It does not do the detecting itself: the daemon owns walls.json and armed.json,
+# and a second writer would race it for the sake of work the daemon is about to
+# do anyway. The hook just says "look now", and the daemon's own sweep is what
+# slows down.
+
+WAKE_SIGNAL = signal.SIGUSR1
+_wake = threading.Event()
+
+
+def _install_wake_handler():
+    """Let SIGUSR1 cut the sleep short. Its default action would kill us."""
+    def handler(_signum, _frame):
+        _wake.set()
+    try:
+        signal.signal(WAKE_SIGNAL, handler)
+        return True
+    except (ValueError, OSError):
+        return False  # not the main thread, or no such signal here
+
+
+def wake_daemon():
+    """Ask a running daemon to tick now. True when one was signalled."""
+    pid = _read_pid()
+    if not _pid_alive(pid):
+        return False
+    try:
+        os.kill(pid, WAKE_SIGNAL)
+        return True
+    except OSError:
+        return False
+
+
+def cmd_on_status(argv):
+    """herdr's status-change hook. Wakes the daemon; detects nothing itself.
+
+    A wall appears when an agent *stops*, so a pane that just started working
+    cannot be at one — and the daemon clears a stale wall on its own next tick.
+    Skipping those halves the signals on a busy session.
+
+    Silent and always successful: this runs on every status change in the
+    session, and a plugin hook that prints or fails on every event is noise.
+    """
+    raw = os.environ.get("HERDR_PLUGIN_EVENT_JSON")
+    status = None
+    if raw:
+        try:
+            status = ((json.loads(raw) or {}).get("data") or {}).get("agent_status")
+        except ValueError:
+            status = None
+    if status == "working":
+        return 0
+    wake_daemon()
+    return 0
+
+
 def cmd_daemon(argv):
     with _Lock():
         existing = _read_pid()
@@ -1114,10 +1210,13 @@ def cmd_daemon(argv):
         with open(PIDFILE, "w") as f:
             f.write(str(os.getpid()))
 
-    log(f"daemon up (poll {POLL_S:g}s, prompt {PROMPT_TEXT!r}"
+    woken = _install_wake_handler()
+    log(f"daemon up (sweep {POLL_S:g}s, prompt {PROMPT_TEXT!r}"
+        f"{', woken by status events' if woken else ', sweep only'}"
         f"{', DRY RUN' if DRY_RUN else ''})")
     pending = set()
     server_fails = 0
+    last_tick = 0.0
     try:
         while True:
             agents = live_agents()
@@ -1132,7 +1231,14 @@ def cmd_daemon(argv):
                     tick(agents, pending)
                 except Exception as exc:  # one bad poll must not kill the loop
                     log(f"tick failed: {exc!r}")
-            time.sleep(POLL_S)
+            last_tick = time.time()
+            # Sleep until the sweep is due or an event wakes us, whichever comes
+            # first, then hold MIN_TICK_S so a burst of events is one tick.
+            _wake.clear()
+            if _wake.wait(POLL_S):
+                remaining = MIN_TICK_S - (time.time() - last_tick)
+                if remaining > 0:
+                    time.sleep(remaining)
     finally:
         with _Lock():
             if _read_pid() == os.getpid():
@@ -1682,6 +1788,7 @@ def cmd_disable_badge(argv):
 
 
 DISPATCH = {
+    "on-status": cmd_on_status,
     "start": cmd_start,
     "enable-badge": cmd_enable_badge,
     "disable-badge": cmd_disable_badge,
