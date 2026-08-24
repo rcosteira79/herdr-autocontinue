@@ -1,7 +1,7 @@
 id = "rcosteira.autocontinue"
 name = "Auto Continue"
 version = "0.1.0"
-min_herdr_version = "0.8.0"
+min_herdr_version = "0.8.2"
 description = "Watches agents for usage-limit walls, badges the countdown to the reset ($wall), and re-prompts the agents you armed once the window reopens."
 platforms = ["macos", "linux"]
 
@@ -69,3 +69,15 @@ id = "list"
 title = "Auto Continue"
 command = ["python3", "autocontinue.py", "ui"]
 placement = "overlay"
+
+# Wake the daemon the moment an agent stops, which is when a wall can appear.
+# The hook does no detecting: the daemon owns the wall state, and a second
+# writer would race it. It just says "look now", which is what lets the sweep
+# behind it run every 60 seconds instead of every 10.
+#
+# Spell the event with dots. herdr's API schema lists the same kinds with
+# underscores, and the manifest turns `pane_agent_status_changed` down with
+# "unknown event". Verified on herdr 0.8.2, hence min_herdr_version.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "autocontinue.py", "on-status"]

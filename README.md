@@ -34,33 +34,41 @@ fires, the daemon re-checks that the agent is still idle (never mid-turn, never
 while it is waiting on you for approval) and that the wall message is still on
 screen — if you already continued it by hand, the wall is simply forgotten.
 
-### Why a daemon
+### Why a daemon, and what the event hook does instead
 
-There **is** a status hook. A plugin can declare it in its manifest:
+A wall appears when an agent **stops**, and herdr announces exactly that:
 
 ```toml
 [[events]]
 on = "pane.agent_status_changed"
-command = ["python3", "autocontinue.py", "check"]
+command = ["python3", "autocontinue.py", "on-status"]
 ```
 
-herdr runs that command on every status change — verified on herdr 0.8.2, one
-run per change. Spell the event with dots. herdr's API schema lists these kinds
-with underscores (`pane_agent_status_changed`), and the manifest turns that form
-down with `unknown event`. The dotted name is the one that loads.
+The hook does no detecting. It sends the daemon a signal that means "look now".
+The daemon owns `walls.json` and `armed.json`, and a second process writing them
+would race it for work the daemon is about to do anyway. So the hook stays tiny,
+and the sweep behind it drops from every 10 seconds to every 60.
 
-What herdr has no hook for is the clock. Waking up hours later, when a weekly
-limit resets, is half of what this plugin does, and no event announces a time.
-So the daemon stays.
+It also ignores an agent that just *started* working, since a pane that is
+running cannot be sitting at a wall. On a busy session that is about half the
+events. A burst is coalesced too: fifteen panes stopping together is one or two
+ticks, not fifteen — `min_tick_s` sets that floor.
 
-Detecting a wall still runs in that daemon today (`autocontinue.py daemon`): a
-poll loop, started by the `[[startup]]` hook and by the `arm` action,
-single-instance via a pidfile, talking only to the local herdr socket. It exits
-on its own if the herdr server goes away. Badges carry a TTL, so if the daemon
-dies they expire instead of lying to you.
+Spell the event with dots. herdr's API schema lists these kinds with underscores
+(`pane_agent_status_changed`), and the manifest turns that form down with
+`unknown event`. Verified on herdr 0.8.2, hence `min_herdr_version`.
 
-Moving detection onto the hook is open work. It would replace reading every
-claude/codex pane every ten seconds with one command per actual status change.
+**The daemon stays, and not only as a fallback.** herdr has no hook for the
+clock, and waking up hours later when a weekly limit resets is half of what this
+plugin does. No event announces a time. The daemon is also what re-asserts the
+badges, which carry a TTL so a dead daemon's badges expire rather than lying to
+you. It is started by the `[[startup]]` hook and by the `arm` action,
+single-instance via a pidfile, and talks only to the local herdr socket. It exits
+on its own if the herdr server goes away.
+
+Without the hook the plugin still works, just up to a sweep late. The startup
+line in the log says which mode it is in: `woken by status events`, or
+`sweep only`.
 
 ## Install
 
@@ -173,7 +181,8 @@ environment, so setting one means exporting it before herdr starts.
 | var | default | meaning |
 |-----|---------|---------|
 | `AUTOCONTINUE_PROMPT` | `continue` | what gets submitted when the window reopens |
-| `AUTOCONTINUE_POLL_S` | `10` | poll interval (s) |
+| `AUTOCONTINUE_POLL_S` | `60` | safety-sweep interval (s); the status hook covers the responsive path |
+| `AUTOCONTINUE_MIN_TICK_S` | `2` | shortest gap between ticks, so an event burst is one tick |
 | `AUTOCONTINUE_GRACE_S` | `60` | extra wait after the parsed reset time |
 | `AUTOCONTINUE_MAX_ATTEMPTS` | `5` | attempts before giving up on a wall |
 | `AUTOCONTINUE_BLIND_RETRY_MIN` | `20` | retry cadence when the message names no time |
@@ -309,12 +318,17 @@ Rotation fires only when **a pane you armed** is walled and the account it bills
 to is spent. An unarmed pane never causes one, which keeps the rule that the
 plugin acts only where you opted in.
 
-It cannot check an account before switching to it. Only the live account keeps a
-fresh token; a parked snapshot's token has usually expired, so there is nothing
-to ask. Rotation therefore switches, prompts, and watches: if that account is
-spent as well, the wall returns and the next profile on the list is tried. One
-pass over the list per dry spell, then it waits for the soonest reset. The list
-resets once the account has capacity again.
+It cannot tell in advance whether an account has **capacity**. Only the live
+account keeps a fresh token, and a parked snapshot's token has usually expired,
+so there is nothing to ask about remaining usage. Rotation therefore switches,
+prompts, and watches: if that account is spent as well, the wall returns and the
+next profile on the list is tried. One pass over the list per dry spell, then it
+waits for the soonest reset. The list resets once the account has capacity again.
+
+It does know whether the login still **works**. `account-switch` renews a parked
+profile and asks the provider before installing it, and refuses a switch the
+provider turns down. So rotation cannot land you on a retired login and sign you
+out; a refused switch is logged and the next profile is tried.
 
 `AUTOCONTINUE_ROTATE_COOLDOWN_S` (default 300) is the minimum gap between
 switches, so a bad detection cannot flip accounts in a loop.
