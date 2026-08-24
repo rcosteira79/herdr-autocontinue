@@ -36,13 +36,31 @@ screen — if you already continued it by hand, the wall is simply forgotten.
 
 ### Why a daemon
 
-herdr plugins fire on user actions only — there is no manifest hook for "an
-agent's status changed", and none for the clock. Detecting a wall and waking up
-hours later are both reactive, so both live in a small companion process
-(`autocontinue.py daemon`): a poll loop, started by the `[[startup]]` hook and
-by the `arm` action, single-instance via a pidfile, talking only to the local
-herdr socket. It exits on its own if the herdr server goes away. Badges carry a
-TTL, so if the daemon dies they expire instead of lying to you.
+There **is** a status hook. A plugin can declare it in its manifest:
+
+```toml
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "autocontinue.py", "check"]
+```
+
+herdr runs that command on every status change — verified on herdr 0.8.2, one
+run per change. Spell the event with dots. herdr's API schema lists these kinds
+with underscores (`pane_agent_status_changed`), and the manifest turns that form
+down with `unknown event`. The dotted name is the one that loads.
+
+What herdr has no hook for is the clock. Waking up hours later, when a weekly
+limit resets, is half of what this plugin does, and no event announces a time.
+So the daemon stays.
+
+Detecting a wall still runs in that daemon today (`autocontinue.py daemon`): a
+poll loop, started by the `[[startup]]` hook and by the `arm` action,
+single-instance via a pidfile, talking only to the local herdr socket. It exits
+on its own if the herdr server goes away. Badges carry a TTL, so if the daemon
+dies they expire instead of lying to you.
+
+Moving detection onto the hook is open work. It would replace reading every
+claude/codex pane every ten seconds with one command per actual status change.
 
 ## Install
 
