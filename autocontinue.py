@@ -140,6 +140,8 @@ TAIL_LINES = _num("AUTOCONTINUE_TAIL_LINES", 15, int)
 READ_LINES = _num("AUTOCONTINUE_READ_LINES", 60, int)
 PROMPT_TEXT = _setting("AUTOCONTINUE_PROMPT") or "continue"
 GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
+# How much earlier an account has to reopen before a wall is re-stamped.
+RESTAMP_MIN_GAIN_S = _num("AUTOCONTINUE_RESTAMP_MIN_GAIN_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
 # Polls a pane must stay missing before its arming is dropped.
@@ -842,6 +844,48 @@ def new_wall(pane_id, kind, info, hit):
     }
 
 
+def restamp_wall(pane_id, wall, kind):
+    """Move a wall's resume time earlier when its account reopens sooner.
+
+    A wall records its reopening once, from whatever it was told when it was
+    first seen. That answer can turn out to be too late: rotation moves the
+    pane onto a different account, or the account revises the window itself.
+    Nothing used to go back and look, so a wall could sit on an hours-old
+    answer while the account paying for it had already reopened.
+
+    Only ever bring a wall forward. A later answer is no reason to make an
+    armed pane wait longer, and a pane already in backoff keeps the retry it
+    earned — that delay was chosen deliberately, one failed attempt at a time.
+    """
+    if wall.get("attempts"):
+        return wall
+    if kind not in ACCOUNT_KINDS:
+        return wall
+    spent = account_block(kind)
+    if not spent:
+        return wall
+    resets_at = spent[0]
+    resume_at = resets_at + GRACE_S
+    if resume_at >= (wall.get("resume_at") or 0) - RESTAMP_MIN_GAIN_S:
+        return wall
+
+    def mutate(walls):
+        entry = walls.get(pane_id)
+        if entry is None:
+            return None
+        entry.update(reset_at=resets_at, resume_at=resume_at,
+                     reason="account (revised)")
+        return dict(entry)
+
+    updated = _update_walls(mutate)
+    if updated is None:
+        return wall
+    log("%s: the account reopens at %s, %s earlier than this wall was told"
+        % (pane_id, datetime.fromtimestamp(resume_at).strftime("%H:%M"),
+           _countdown(wall["resume_at"] - resume_at)))
+    return updated
+
+
 def _backoff(attempts):
     return min(300 * (3 ** max(0, attempts - 1)), 3600)
 
@@ -1106,6 +1150,7 @@ def tick(agents, pending):
                 f"-> resume {when}"
                 f"{'' if pane_id in armed else ' (not armed, watching only)'}")
 
+        wall = restamp_wall(pane_id, wall, kind)
         set_badge(pane_id, wall, armed)
 
         # Rotation: only for a pane you armed, and only while the account it

@@ -233,6 +233,59 @@ check("the other provider's windows are left alone", "codex" in cache,
       str(sorted(cache)))
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
+# ---- a wall whose account reopens sooner than it was told -----------------
+#
+# A wall records its resume time once, when it is first seen. Rotation, or a
+# window the account revises, can move the real reopening earlier — and for two
+# hours on 26 August nothing went back to look.
+
+
+def a_wall(resume_in, attempts=0):
+    """A waiting wall that resumes `resume_in` seconds from now."""
+    now = time.time()
+    return {
+        "pane_id": "w1:pA", "kind": "claude", "label": "Claude Code",
+        "rule": "account:session", "matched": "account window session at 100%",
+        "detected_at": now, "reset_at": now + resume_in - A.GRACE_S,
+        "resume_at": now + resume_in, "reason": "account",
+        "attempts": attempts, "last_attempt": None, "status": "waiting",
+    }
+
+
+def account_reopens_in(seconds):
+    A.account_block = lambda kind=None: (time.time() + seconds, "session", 100)
+
+
+REAL_BLOCK = A.account_block
+
+print("\na wall follows its account to an earlier reopening")
+wall = a_wall(3 * 3600 + 26 * 60)          # the 3h26 the badge showed
+A._save(A.WALLS, {"w1:pA": wall})
+account_reopens_in(2 * 3600 + 3 * 60)      # what the live account really said
+moved = A.restamp_wall("w1:pA", wall, "claude")
+check("the wall moves earlier", moved["resume_at"] < wall["resume_at"] - 3000,
+      "moved by %d minutes" % ((wall["resume_at"] - moved["resume_at"]) / 60))
+check("the move is written down, not only returned",
+      A.load_walls()["w1:pA"]["resume_at"] == moved["resume_at"])
+
+print("\nand is never pushed out to a later one")
+wall = a_wall(600)
+A._save(A.WALLS, {"w1:pA": wall})
+account_reopens_in(4 * 3600)
+kept = A.restamp_wall("w1:pA", wall, "claude")
+check("a later reset does not delay the wall",
+      kept["resume_at"] == wall["resume_at"], str(kept["resume_at"]))
+
+print("\na wall already in backoff keeps the retry it earned")
+wall = a_wall(300, attempts=2)
+A._save(A.WALLS, {"w1:pA": wall})
+account_reopens_in(60)
+kept = A.restamp_wall("w1:pA", wall, "claude")
+check("the backoff is left alone", kept["resume_at"] == wall["resume_at"],
+      str(kept["resume_at"]))
+
+A.account_block = REAL_BLOCK
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
