@@ -28,6 +28,31 @@ FAILED = []
 LISBON = ZoneInfo("Europe/Lisbon")
 
 
+class _PinnedClock:
+    """The real time module, with time() pinned to whatever `at` last set.
+
+    `parse_reset` reads the calendar from datetime.now() but takes its "not in
+    the past" cutoff from time.time(). Pinning only the first left every check
+    leaning on the real date: a reset parsed for the pinned day dropped into
+    the real past once that day rolled over, the cutoff discarded it, and the
+    checks went red on their own.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self.pinned = None
+
+    def time(self):
+        return self._real.time() if self.pinned is None else self.pinned
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+CLOCK = _PinnedClock(time)
+A.time = CLOCK
+
+
 def check(name, ok, detail=""):
     print(("  ok   " if ok else "  FAIL ") + name
           + (" — " + detail if detail and not ok else ""))
@@ -42,6 +67,7 @@ def at(now):
         def now(cls, tz=None):
             return now if tz is None else now.replace(tzinfo=LISBON).astimezone(tz)
     A.datetime = Pinned
+    CLOCK.pinned = now.replace(tzinfo=LISBON).timestamp()
 
 
 # ---- reset-time parsing across a daylight-saving change ------------------
@@ -79,7 +105,17 @@ got, _ = A.parse_reset("resets at 9am")
 check("it is tomorrow, not this morning",
       got == dt.datetime(2026, 8, 25, 9, 0, tzinfo=LISBON).timestamp(), str(got))
 
+print("\nthe checks do not lean on today's real date")
+# parse_reset drops anything already in the past. It reads that "now" from
+# time.time(), not from the datetime this harness pins, so a check pinned to
+# any earlier day used to rot into a failure the moment the day rolled over.
+at(dt.datetime(2020, 5, 10, 15, 0))
+got, _ = A.parse_reset("resets at 9am")
+check("a reset pinned years back still resolves",
+      got == dt.datetime(2020, 5, 11, 9, 0, tzinfo=LISBON).timestamp(), str(got))
+
 A.datetime = dt.datetime
+CLOCK.pinned = None
 
 # ---- waking the daemon --------------------------------------------------
 
