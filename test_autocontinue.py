@@ -190,6 +190,49 @@ A._save(A.ROTATE_STATE, {"last_switch": time.time(), "tried": []})
 check("a switch just made blocks the next one",
       A.rotate_account("claude") is False)
 
+# ---- the usage cache across a switch -------------------------------------
+#
+# The account behind a pane changes the moment credentials are replaced, so a
+# window read before the switch describes an account nobody is billing any
+# more. Serving it is what stamped every wall with the previous account's
+# reset for the three minutes the cache lives.
+
+
+class _Ran:
+    """What subprocess.run and herdr() hand back, minus the process."""
+
+    def __init__(self, code=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = code, out, err
+
+
+def a_successful_switch():
+    """Stub every outside call rotation makes, and let it report success."""
+    A.ROTATE_PROFILES = ["spare"]
+    A._switcher_script = lambda: "/nonexistent/switcher.py"
+    A._switch_profiles = lambda script, kind: [
+        ("main", "Main", True), ("spare", "Spare", False)]
+    A.subprocess.run = lambda *a, **k: _Ran(0, "claude: switched to Spare")
+    A.herdr = lambda *a, **k: _Ran(0)
+    A._save(A.ROTATE_STATE, {})
+
+
+print("\na switch forgets the windows it read from the old account")
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+a_successful_switch()
+A._save(A.USAGE_CACHE, {
+    "claude": {"fetched_at": time.time(), "tried_at": time.time(),
+               "windows": [{"kind": "session", "percent": 100}]},
+    "codex": {"fetched_at": time.time(), "tried_at": time.time(),
+              "windows": [{"kind": "5h", "percent": 12}]},
+})
+check("the switch reports success", A.rotate_account("claude") is True)
+cache = A._load(A.USAGE_CACHE, {})
+check("the switched account's windows are dropped", "claude" not in cache,
+      str(sorted(cache)))
+check("the other provider's windows are left alone", "codex" in cache,
+      str(sorted(cache)))
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))

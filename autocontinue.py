@@ -763,6 +763,23 @@ def usage_windows(provider="claude", force=False):
     return windows
 
 
+def drop_usage_cache(provider):
+    """Forget one provider's windows, so the next read asks the account again.
+
+    Credentials are machine-wide, so replacing them retires every number read
+    from the account that is leaving. The whole entry goes, `tried_at` with it:
+    keeping that would hold the next read off for USAGE_MIN_GAP_S and serve the
+    old account's windows for exactly as long.
+    """
+    if not provider:
+        return
+    store = _load(USAGE_CACHE, {})
+    if store.pop(provider, None) is None:
+        return
+    _save(USAGE_CACHE, store)
+    log("forgot the cached %s windows: the account behind them changed" % provider)
+
+
 def _spent(window):
     # Codex reports it outright; nothing else has to be inferred for it.
     if window.get("blocked") is not None:
@@ -944,6 +961,9 @@ def rotate_account(kind):
         log("rotate: switch to %s failed: %s"
             % (target, (res.stderr or "").strip()[:200]))
         return False
+    # Before anything else reads the account: the pane that triggered this is
+    # about to be re-badged, and the windows on disk belong to the old account.
+    drop_usage_cache(KIND_PROVIDER.get(kind))
     tried.add(target)
     _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried)})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
