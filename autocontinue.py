@@ -896,13 +896,20 @@ def _backoff(attempts):
 # Switching credentials is machine-wide, so this only ever lands on a profile
 # you named, and only when a pane you armed is the one that is stuck.
 #
-# There is no way to ask a parked account whether it has capacity: only the live
-# account keeps a fresh token, so a saved snapshot cannot be queried. Rotation
-# therefore switches and watches. If the new account is spent too, the wall
-# comes back and the next profile is tried, up to one pass over the list.
+# account-switch publishes what each saved account has left, parked ones
+# included, so the candidates are ranked rather than taken in the order they
+# were saved: an account with room first, then one nobody has read lately, then
+# the accounts known to be spent, soonest to reopen first.
+#
+# A reading can still be old, and no reading at all is normal. Rotation
+# therefore switches and watches, as it always did: if the new account is spent
+# too the wall comes back and the next profile is tried, up to one pass over
+# the list.
 
 ROTATE_PROFILES = _list("AUTOCONTINUE_ROTATE_PROFILES")
 ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
+# Past this age, an account's reading is treated as no reading at all.
+ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -969,6 +976,30 @@ def _switch_profiles(script, kind):
     return [p for p in data if isinstance(p, dict) and p.get("slug")]
 
 
+def _rotate_rank(profile, now):
+    """Sort key for a rotation candidate, best account first.
+
+    Three bands. An account read recently with nothing spent has room right
+    now, so it goes first. Then an account nobody has read lately: a parked
+    account is usually parked because it was left alone, so its window has
+    most likely reopened already, and one switch is what finds out. Last come
+    the accounts known to be spent, soonest to reopen first.
+
+    Every candidate lands in the same band when there is nothing to rank by,
+    and the sort is stable, so an older account-switch leaves the saved order
+    exactly as it was.
+    """
+    windows = profile.get("windows")
+    read_at = profile.get("at")
+    if not windows or not read_at or (now - read_at) > ROTATE_STALE_S:
+        return (1, 0.0)
+    spent = [w["resets_at"] for w in windows
+             if _spent(w) and w.get("resets_at")]
+    if not spent:
+        return (0, 0.0)
+    return (2, min(spent))
+
+
 def rotate_account(kind):
     """Switch to the next allowed profile with capacity. True when it switched.
 
@@ -1000,6 +1031,7 @@ def rotate_account(kind):
     ]
     if not allowed:
         return False
+    allowed.sort(key=lambda p: _rotate_rank(p, now))
     target = allowed[0]["slug"]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],

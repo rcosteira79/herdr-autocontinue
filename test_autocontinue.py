@@ -288,6 +288,85 @@ check("the backoff is left alone", kept["resume_at"] == wall["resume_at"],
 
 A.account_block = REAL_BLOCK
 
+# ---- which account rotation reaches for ----------------------------------
+#
+# Rotation used to take the first name it was allowed to use, which is the
+# order the profiles were saved in. That says nothing about which account can
+# actually do any work.
+
+
+def spent(resets_in):
+    return [{"label": "session", "percent": 100,
+             "resets_at": time.time() + resets_in}]
+
+
+def candidates(*profiles):
+    A._switch_profiles = lambda script, kind: [
+        {"slug": "live", "label": "Live", "active": True}] + list(profiles)
+
+
+def rotation_chose():
+    """The profile rotation switched to, or None."""
+    chosen = []
+    A.subprocess.run = lambda cmd, **k: (
+        chosen.append(cmd[-1]) or _Ran(0, "switched"))
+    A._save(A.ROTATE_STATE, {})
+    A.rotate_account("claude")
+    return chosen[0] if chosen else None
+
+
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+
+print("\nrotation reaches for the account that comes back soonest")
+a_successful_switch()
+A.ROTATE_PROFILES = ["late", "soon"]
+now = time.time()
+candidates(
+    {"slug": "late", "label": "Late", "active": False, "at": now,
+     "windows": spent(4 * 3600)},
+    {"slug": "soon", "label": "Soon", "active": False, "at": now,
+     "windows": spent(30 * 60)},
+)
+check("the sooner reset beats the older profile", rotation_chose() == "soon",
+      str(rotation_chose()))
+
+print("\nan account with capacity beats any reset at all")
+a_successful_switch()
+A.ROTATE_PROFILES = ["soon", "free"]
+candidates(
+    {"slug": "soon", "label": "Soon", "active": False, "at": now,
+     "windows": spent(30 * 60)},
+    {"slug": "free", "label": "Free", "active": False, "at": now,
+     "windows": [{"label": "session", "percent": 12,
+                  "resets_at": now + 3600}]},
+)
+check("the account with room left is chosen", rotation_chose() == "free",
+      str(rotation_chose()))
+
+print("\nand an unread account is tried before one known to be spent")
+a_successful_switch()
+A.ROTATE_PROFILES = ["soon", "unread"]
+candidates(
+    {"slug": "soon", "label": "Soon", "active": False, "at": now,
+     "windows": spent(30 * 60)},
+    {"slug": "unread", "label": "Unread", "active": False,
+     "at": now - 4 * 3600, "windows": spent(30 * 60)},
+)
+check("the stale reading is tried first", rotation_chose() == "unread",
+      str(rotation_chose()))
+
+print("\nwith nothing to rank by, the saved order still decides")
+a_successful_switch()
+A.ROTATE_PROFILES = ["first", "second"]
+candidates(
+    {"slug": "first", "label": "First", "active": False},
+    {"slug": "second", "label": "Second", "active": False},
+)
+check("an older account-switch is not a failure",
+      rotation_chose() == "first", str(rotation_chose()))
+
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
