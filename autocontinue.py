@@ -1012,7 +1012,12 @@ def _refresh_profiles(script, kind):
     except ValueError:
         log("rotate: the account reading did not parse")
         return None
-    return [r for r in rows if isinstance(r, dict) and r.get("slug")] or None
+    # Keep only the kind that was asked about. The same profile names exist
+    # under both harnesses, and an account-switch too old to filter answers
+    # with every kind — a ChatGPT row must never decide a claude switch.
+    return [r for r in rows
+            if isinstance(r, dict) and r.get("slug")
+            and r.get("kind", kind) == kind] or None
 
 
 def _rotate_rank(profile, now):

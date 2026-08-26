@@ -510,6 +510,22 @@ check("last_refresh is still on record",
 check("and so is the switch it recorded",
       A._load(A.ROTATE_STATE, {}).get("last_switch") is not None)
 
+print("\na reading is trusted only for the kind it was asked about")
+# The same profile names exist under both harnesses, and an account-switch too
+# old to filter answers with every kind. A codex row must never decide which
+# claude account is switched to.
+a_successful_switch()
+A.ROTATE_PROFILES = ["spent", "free"]
+A._switch_profiles = lambda script, kind: [
+    stale("live", "Live", 100, active=True),
+    stale("spent", "Spent", 100), stale("free", "Free", 100)]
+mixed = [fresh("spent", "Spent", 100), fresh("free", "Free", 10)]
+mixed[1]["kind"] = "codex"          # the same slug, the wrong harness
+calls, A.subprocess.run = recorder(mixed)
+A.rotate_account("claude")
+check("a row from another kind is not used",
+      switches(calls) == ["spent"], str(switches(calls)))
+
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
 shutil.rmtree(STATE, ignore_errors=True)
