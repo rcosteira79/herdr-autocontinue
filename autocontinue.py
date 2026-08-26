@@ -949,7 +949,13 @@ def _switch_env():
 
 
 def _switch_profiles(script, kind):
-    """[(slug, label, is_live)] for a kind, from account-switch's own status."""
+    """The saved profiles for a kind, from account-switch's own status.
+
+    One dict per profile, as that plugin publishes it: slug, label, active,
+    and — where it has a reading — the account's windows and when they were
+    read. An older account-switch sends the names alone, which is why nothing
+    here treats a missing reading as an error.
+    """
     res = subprocess.run(
         ["python3", script, "list", "--kind", kind, "--json"],
         capture_output=True, text=True, timeout=30, env=_switch_env(),
@@ -960,10 +966,7 @@ def _switch_profiles(script, kind):
         data = json.loads(res.stdout or "[]")
     except ValueError:
         return []
-    return [
-        (p.get("slug"), p.get("label"), bool(p.get("active")))
-        for p in data if p.get("slug")
-    ]
+    return [p for p in data if isinstance(p, dict) and p.get("slug")]
 
 
 def rotate_account(kind):
@@ -985,18 +988,19 @@ def rotate_account(kind):
     profiles = _switch_profiles(script, kind)
     if not profiles:
         return False
-    live = next((slug for slug, _, active in profiles if active), None)
+    live = next((p["slug"] for p in profiles if p.get("active")), None)
     tried = set(state.get("tried") or [])
     if live:
         tried.add(live)
     allowed = [
-        slug for slug, label, _ in profiles
-        if slug not in tried
-        and (slug.lower() in ROTATE_PROFILES or (label or "").lower() in ROTATE_PROFILES)
+        p for p in profiles
+        if p["slug"] not in tried
+        and (p["slug"].lower() in ROTATE_PROFILES
+             or (p.get("label") or "").lower() in ROTATE_PROFILES)
     ]
     if not allowed:
         return False
-    target = allowed[0]
+    target = allowed[0]["slug"]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],
         capture_output=True, text=True, timeout=60, env=_switch_env(),

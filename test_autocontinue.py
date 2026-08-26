@@ -181,7 +181,8 @@ print("\nrotation only lands on a named profile")
 A.ROTATE_PROFILES = ["spare"]
 A._switcher_script = lambda: "/nonexistent/switcher.py"
 A._switch_profiles = lambda script, kind: [
-    ("main", "Main", True), ("other", "Other", False)]
+    {"slug": "main", "label": "Main", "active": True},
+    {"slug": "other", "label": "Other", "active": False}]
 check("a profile nobody named is not chosen", A.rotate_account("claude") is False)
 
 print("\nrotation respects its cooldown")
@@ -210,7 +211,8 @@ def a_successful_switch():
     A.ROTATE_PROFILES = ["spare"]
     A._switcher_script = lambda: "/nonexistent/switcher.py"
     A._switch_profiles = lambda script, kind: [
-        ("main", "Main", True), ("spare", "Spare", False)]
+        {"slug": "main", "label": "Main", "active": True},
+        {"slug": "spare", "label": "Spare", "active": False}]
     A.subprocess.run = lambda *a, **k: _Ran(0, "claude: switched to Spare")
     A.herdr = lambda *a, **k: _Ran(0)
     A._save(A.ROTATE_STATE, {})
