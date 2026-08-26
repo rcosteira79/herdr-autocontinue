@@ -367,6 +367,44 @@ check("an older account-switch is not a failure",
 
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
+# ---- the poll itself -----------------------------------------------------
+#
+# restamp_wall is only worth anything if the poll calls it before it draws the
+# badge. That wiring is the whole difference between a badge that follows the
+# account and one that counts down to a time nobody is waiting for any more.
+
+print("\nthe poll re-stamps a wall before it badges it")
+badged = {}
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+
+
+def record_badge(*args, **kwargs):
+    if args[:2] == ("pane", "report-metadata"):
+        for i, arg in enumerate(args):
+            if arg == "--token":
+                badged["token"] = args[i + 1]
+    return _Ran(0)
+
+
+A.herdr = record_badge
+A.pane_text = lambda pane_id, lines=None: "Usage limit reached"
+A.account_block = lambda kind=None: (time.time() + 2 * 3600 + 3 * 60,
+                                     "session", 100)
+A.ROTATE_PROFILES = []                     # no switching in this check
+A._save(A.ARMED, [])                       # unarmed: badge only, never a prompt
+A._save(A.WALLS, {"w1:pA": a_wall(3 * 3600 + 26 * 60)})
+# `agent` is the kind herdr reports; the human-readable name is `name`.
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "claude",
+                  "name": "Claude Code"}}, set())
+check("the badge was drawn", "token" in badged, str(badged))
+check("it counts down to the account, not to the old stamp",
+      badged.get("token", "").endswith("2h03"), str(badged.get("token")))
+check("the wall on disk moved too",
+      A.load_walls()["w1:pA"]["reason"] == "account (revised)",
+      str(A.load_walls().get("w1:pA", {}).get("reason")))
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
+A.account_block = REAL_BLOCK
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
