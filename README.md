@@ -19,6 +19,12 @@ agent when it is over.
 - **Back off** — if the wall is still up (the parse was off, or it was the
   weekly limit and not the 5-hour one), it retries on a widening delay and
   gives up after five attempts instead of hammering the pane.
+- **Follow the account** — a wall is stamped with the reopening it was told
+  about when it was first seen, and that answer can turn out to be too late:
+  rotation moves the pane onto another account, or the account revises its own
+  window. The countdown is brought forward when that happens. Only forward — a
+  later answer never makes an armed pane wait longer, and a pane already
+  backing off keeps the retry it earned.
 
 Badges: `🔄` armed, standing by · `🔄3h09` armed, will continue · `⏸3h09` seen
 but not armed · `⚠` gave up. An armed agent carries the glyph from the moment
@@ -184,6 +190,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_POLL_S` | `60` | safety-sweep interval (s); the status hook covers the responsive path |
 | `AUTOCONTINUE_MIN_TICK_S` | `2` | shortest gap between ticks, so an event burst is one tick |
 | `AUTOCONTINUE_GRACE_S` | `60` | extra wait after the parsed reset time |
+| `AUTOCONTINUE_RESTAMP_MIN_GAIN_S` | `60` | how much sooner an account must reopen before a wall follows it |
 | `AUTOCONTINUE_MAX_ATTEMPTS` | `5` | attempts before giving up on a wall |
 | `AUTOCONTINUE_BLIND_RETRY_MIN` | `20` | retry cadence when the message names no time |
 | `AUTOCONTINUE_TAIL_LINES` | `15` | how many tail lines of a pane count as "the wall" |
@@ -198,6 +205,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
+| `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
 | `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed |
@@ -318,12 +326,18 @@ Rotation fires only when **a pane you armed** is walled and the account it bills
 to is spent. An unarmed pane never causes one, which keeps the rule that the
 plugin acts only where you opted in.
 
-It cannot tell in advance whether an account has **capacity**. Only the live
-account keeps a fresh token, and a parked snapshot's token has usually expired,
-so there is nothing to ask about remaining usage. Rotation therefore switches,
-prompts, and watches: if that account is spent as well, the wall returns and the
-next profile on the list is tried. One pass over the list per dry spell, then it
-waits for the soonest reset. The list resets once the account has capacity again.
+It ranks the accounts it may switch to. `account-switch` publishes what each
+saved account has left, parked ones included, so rotation takes an account with
+room first, then one nobody has read in the last half hour, then the accounts
+known to be spent, soonest to reopen first. An unread account goes ahead of a
+spent one on purpose: a parked account is usually parked because it was left
+alone, so its window has most likely reopened, and one switch is what finds out.
+
+A reading can still be old, and an `account-switch` too old to publish one sends
+the names alone. Rotation therefore switches, prompts, and watches, as it always
+did: if that account is spent as well, the wall returns and the next profile on
+the list is tried. One pass over the list per dry spell, then it waits for the
+soonest reset. The list resets once the account has capacity again.
 
 It does know whether the login still **works**. `account-switch` renews a parked
 profile and asks the provider before installing it, and refuses a switch the

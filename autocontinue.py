@@ -140,6 +140,8 @@ TAIL_LINES = _num("AUTOCONTINUE_TAIL_LINES", 15, int)
 READ_LINES = _num("AUTOCONTINUE_READ_LINES", 60, int)
 PROMPT_TEXT = _setting("AUTOCONTINUE_PROMPT") or "continue"
 GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
+# How much earlier an account has to reopen before a wall is re-stamped.
+RESTAMP_MIN_GAIN_S = _num("AUTOCONTINUE_RESTAMP_MIN_GAIN_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
 # Polls a pane must stay missing before its arming is dropped.
@@ -763,6 +765,23 @@ def usage_windows(provider="claude", force=False):
     return windows
 
 
+def drop_usage_cache(provider):
+    """Forget one provider's windows, so the next read asks the account again.
+
+    Credentials are machine-wide, so replacing them retires every number read
+    from the account that is leaving. The whole entry goes, `tried_at` with it:
+    keeping that would hold the next read off for USAGE_MIN_GAP_S and serve the
+    old account's windows for exactly as long.
+    """
+    if not provider:
+        return
+    store = _load(USAGE_CACHE, {})
+    if store.pop(provider, None) is None:
+        return
+    _save(USAGE_CACHE, store)
+    log("forgot the cached %s windows: the account behind them changed" % provider)
+
+
 def _spent(window):
     # Codex reports it outright; nothing else has to be inferred for it.
     if window.get("blocked") is not None:
@@ -825,6 +844,48 @@ def new_wall(pane_id, kind, info, hit):
     }
 
 
+def restamp_wall(pane_id, wall, kind):
+    """Move a wall's resume time earlier when its account reopens sooner.
+
+    A wall records its reopening once, from whatever it was told when it was
+    first seen. That answer can turn out to be too late: rotation moves the
+    pane onto a different account, or the account revises the window itself.
+    Nothing used to go back and look, so a wall could sit on an hours-old
+    answer while the account paying for it had already reopened.
+
+    Only ever bring a wall forward. A later answer is no reason to make an
+    armed pane wait longer, and a pane already in backoff keeps the retry it
+    earned — that delay was chosen deliberately, one failed attempt at a time.
+    """
+    if wall.get("attempts"):
+        return wall
+    if kind not in ACCOUNT_KINDS:
+        return wall
+    spent = account_block(kind)
+    if not spent:
+        return wall
+    resets_at = spent[0]
+    resume_at = resets_at + GRACE_S
+    if resume_at >= (wall.get("resume_at") or 0) - RESTAMP_MIN_GAIN_S:
+        return wall
+
+    def mutate(walls):
+        entry = walls.get(pane_id)
+        if entry is None:
+            return None
+        entry.update(reset_at=resets_at, resume_at=resume_at,
+                     reason="account (revised)")
+        return dict(entry)
+
+    updated = _update_walls(mutate)
+    if updated is None:
+        return wall
+    log("%s: the account reopens at %s, %s earlier than this wall was told"
+        % (pane_id, datetime.fromtimestamp(resume_at).strftime("%H:%M"),
+           _countdown(wall["resume_at"] - resume_at)))
+    return updated
+
+
 def _backoff(attempts):
     return min(300 * (3 ** max(0, attempts - 1)), 3600)
 
@@ -835,13 +896,20 @@ def _backoff(attempts):
 # Switching credentials is machine-wide, so this only ever lands on a profile
 # you named, and only when a pane you armed is the one that is stuck.
 #
-# There is no way to ask a parked account whether it has capacity: only the live
-# account keeps a fresh token, so a saved snapshot cannot be queried. Rotation
-# therefore switches and watches. If the new account is spent too, the wall
-# comes back and the next profile is tried, up to one pass over the list.
+# account-switch publishes what each saved account has left, parked ones
+# included, so the candidates are ranked rather than taken in the order they
+# were saved: an account with room first, then one nobody has read lately, then
+# the accounts known to be spent, soonest to reopen first.
+#
+# A reading can still be old, and no reading at all is normal. Rotation
+# therefore switches and watches, as it always did: if the new account is spent
+# too the wall comes back and the next profile is tried, up to one pass over
+# the list.
 
 ROTATE_PROFILES = _list("AUTOCONTINUE_ROTATE_PROFILES")
 ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
+# Past this age, an account's reading is treated as no reading at all.
+ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -888,7 +956,13 @@ def _switch_env():
 
 
 def _switch_profiles(script, kind):
-    """[(slug, label, is_live)] for a kind, from account-switch's own status."""
+    """The saved profiles for a kind, from account-switch's own status.
+
+    One dict per profile, as that plugin publishes it: slug, label, active,
+    and — where it has a reading — the account's windows and when they were
+    read. An older account-switch sends the names alone, which is why nothing
+    here treats a missing reading as an error.
+    """
     res = subprocess.run(
         ["python3", script, "list", "--kind", kind, "--json"],
         capture_output=True, text=True, timeout=30, env=_switch_env(),
@@ -899,10 +973,31 @@ def _switch_profiles(script, kind):
         data = json.loads(res.stdout or "[]")
     except ValueError:
         return []
-    return [
-        (p.get("slug"), p.get("label"), bool(p.get("active")))
-        for p in data if p.get("slug")
-    ]
+    return [p for p in data if isinstance(p, dict) and p.get("slug")]
+
+
+def _rotate_rank(profile, now):
+    """Sort key for a rotation candidate, best account first.
+
+    Three bands. An account read recently with nothing spent has room right
+    now, so it goes first. Then an account nobody has read lately: a parked
+    account is usually parked because it was left alone, so its window has
+    most likely reopened already, and one switch is what finds out. Last come
+    the accounts known to be spent, soonest to reopen first.
+
+    Every candidate lands in the same band when there is nothing to rank by,
+    and the sort is stable, so an older account-switch leaves the saved order
+    exactly as it was.
+    """
+    windows = profile.get("windows")
+    read_at = profile.get("at")
+    if not windows or not read_at or (now - read_at) > ROTATE_STALE_S:
+        return (1, 0.0)
+    spent = [w["resets_at"] for w in windows
+             if _spent(w) and w.get("resets_at")]
+    if not spent:
+        return (0, 0.0)
+    return (2, min(spent))
 
 
 def rotate_account(kind):
@@ -924,18 +1019,20 @@ def rotate_account(kind):
     profiles = _switch_profiles(script, kind)
     if not profiles:
         return False
-    live = next((slug for slug, _, active in profiles if active), None)
+    live = next((p["slug"] for p in profiles if p.get("active")), None)
     tried = set(state.get("tried") or [])
     if live:
         tried.add(live)
     allowed = [
-        slug for slug, label, _ in profiles
-        if slug not in tried
-        and (slug.lower() in ROTATE_PROFILES or (label or "").lower() in ROTATE_PROFILES)
+        p for p in profiles
+        if p["slug"] not in tried
+        and (p["slug"].lower() in ROTATE_PROFILES
+             or (p.get("label") or "").lower() in ROTATE_PROFILES)
     ]
     if not allowed:
         return False
-    target = allowed[0]
+    allowed.sort(key=lambda p: _rotate_rank(p, now))
+    target = allowed[0]["slug"]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],
         capture_output=True, text=True, timeout=60, env=_switch_env(),
@@ -944,6 +1041,9 @@ def rotate_account(kind):
         log("rotate: switch to %s failed: %s"
             % (target, (res.stderr or "").strip()[:200]))
         return False
+    # Before anything else reads the account: the pane that triggered this is
+    # about to be re-badged, and the windows on disk belong to the old account.
+    drop_usage_cache(KIND_PROVIDER.get(kind))
     tried.add(target)
     _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried)})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
@@ -1086,6 +1186,7 @@ def tick(agents, pending):
                 f"-> resume {when}"
                 f"{'' if pane_id in armed else ' (not armed, watching only)'}")
 
+        wall = restamp_wall(pane_id, wall, kind)
         set_badge(pane_id, wall, armed)
 
         # Rotation: only for a pane you armed, and only while the account it
