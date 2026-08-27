@@ -192,6 +192,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_GRACE_S` | `60` | extra wait after the parsed reset time |
 | `AUTOCONTINUE_RESTAMP_MIN_GAIN_S` | `60` | how much sooner an account must reopen before a wall follows it |
 | `AUTOCONTINUE_MAX_ATTEMPTS` | `5` | attempts before giving up on a wall |
+| `AUTOCONTINUE_STOP_WAIT_S` | `5` | how long `stop` waits for the daemon to exit |
 | `AUTOCONTINUE_BLIND_RETRY_MIN` | `20` | retry cadence when the message names no time |
 | `AUTOCONTINUE_TAIL_LINES` | `15` | how many tail lines of a pane count as "the wall" |
 | `AUTOCONTINUE_READ_LINES` | `60` | rows read from each pane per poll |

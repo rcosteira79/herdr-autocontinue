@@ -144,6 +144,8 @@ GRACE_S = _num("AUTOCONTINUE_GRACE_S", 60.0)
 RESTAMP_MIN_GAIN_S = _num("AUTOCONTINUE_RESTAMP_MIN_GAIN_S", 60.0)
 BLIND_RETRY_S = _num("AUTOCONTINUE_BLIND_RETRY_MIN", 20.0) * 60
 MAX_ATTEMPTS = _num("AUTOCONTINUE_MAX_ATTEMPTS", 5, int)
+# How long `stop` waits for a signalled daemon to actually exit.
+STOP_WAIT_S = _num("AUTOCONTINUE_STOP_WAIT_S", 5.0)
 # Polls a pane must stay missing before its arming is dropped.
 ABSENT_POLLS = _num("AUTOCONTINUE_ABSENT_POLLS", 3, int)
 DRY_RUN = _flag("AUTOCONTINUE_DRY_RUN")
@@ -1412,6 +1414,36 @@ def cmd_start(argv):
     return 0
 
 
+def _await_exit(pid):
+    """Wait for a signalled process to go. True once it has."""
+    deadline = time.time() + STOP_WAIT_S
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid)
+
+
+def cmd_restart(argv):
+    """Stop and start again in one process, so new code is actually loaded.
+
+    Two separate calls cannot do this reliably. herdr's action invocation
+    returns while the command is still running, so a `start` invoked behind a
+    `stop` can read a pid the old daemon has not released yet, report "already
+    running", and decline — and then the old process exits, leaving nothing
+    watching. Doing both here keeps the order.
+    """
+    cmd_stop(argv)
+    if ensure_daemon():
+        print(f"autocontinue: restarted (log: {LOGFILE})")
+    else:
+        print("autocontinue: could not restart — something still holds the pid",
+              file=sys.stderr)
+        return 1
+    warn_if_unwired()
+    return 0
+
+
 def cmd_stop(argv):
     pid = _read_pid()
     if not _pid_alive(pid):
@@ -1419,10 +1451,18 @@ def cmd_stop(argv):
     else:
         try:
             os.kill(pid, 15)
-            print(f"autocontinue: stopped (pid {pid})")
         except OSError as exc:
             print(f"autocontinue: could not stop pid {pid}: {exc}", file=sys.stderr)
             return 1
+        # Wait for it to go, rather than reporting a stop that has not happened
+        # yet. Anything starting a daemon behind us reads the pid to decide
+        # whether one is already up, and a pid that outlives this call is what
+        # makes it decline.
+        if not _await_exit(pid):
+            print("autocontinue: pid %d did not stop within %ds"
+                  % (pid, int(STOP_WAIT_S)), file=sys.stderr)
+            return 1
+        print(f"autocontinue: stopped (pid {pid})")
     for pane_id in load_walls():
         clear_badge(pane_id)
     return 0
@@ -1947,6 +1987,7 @@ DISPATCH = {
     "enable-badge": cmd_enable_badge,
     "disable-badge": cmd_disable_badge,
     "stop": cmd_stop,
+    "restart": cmd_restart,
     "status": cmd_status,
     "arm": cmd_arm,
     "scan": cmd_scan,

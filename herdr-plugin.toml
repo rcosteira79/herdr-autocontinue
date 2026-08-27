@@ -51,6 +51,15 @@ title = "Auto-continue: stop watcher"
 contexts = ["global"]
 command = ["python3", "autocontinue.py", "stop"]
 
+# Stop and start in one command. Two separate action invocations cannot do it:
+# herdr returns while the first is still running, so the start can read a pid
+# the old daemon has not released and decline to start at all.
+[[actions]]
+id = "restart"
+title = "Auto-continue: restart watcher"
+contexts = ["global"]
+command = ["python3", "autocontinue.py", "restart"]
+
 [[actions]]
 id = "status"
 title = "Auto-continue: status"
