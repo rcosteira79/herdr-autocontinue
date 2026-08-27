@@ -306,11 +306,21 @@ def candidates(*profiles):
 
 
 def rotation_chose():
-    """The profile rotation switched to, or None."""
+    """The profile rotation switched to, or None.
+
+    Rotation also reads the accounts before it chooses, so only the switch call
+    is recorded here. The gap is pre-spent, which keeps these checks about the
+    ranking of the readings already on hand.
+    """
     chosen = []
-    A.subprocess.run = lambda cmd, **k: (
-        chosen.append(cmd[-1]) or _Ran(0, "switched"))
-    A._save(A.ROTATE_STATE, {})
+
+    def run(cmd, **kwargs):
+        if "switch" in cmd:
+            chosen.append(cmd[-1])
+        return _Ran(0, "switched")
+
+    A.subprocess.run = run
+    A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
     A.rotate_account("claude")
     return chosen[0] if chosen else None
 
@@ -404,6 +414,119 @@ check("the wall on disk moved too",
       str(A.load_walls().get("w1:pA", {}).get("reason")))
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK
+
+# ---- reading the accounts before choosing one ----------------------------
+#
+# Ranking is only as good as the readings it ranks. Nothing refreshes them on a
+# timer, so by the time a wall appears they are usually hours old and every
+# candidate lands in the same band. A rotation is rare and a switch is heavy,
+# so it can afford one fresh look — but only when there is a choice to make,
+# and only once per gap, or a sweep every minute would hammer the endpoint.
+
+
+def recorder(fresh_rows):
+    """Record every subprocess rotation makes; answer a usage read with rows."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if "usage" in cmd:
+            return _Ran(0, json.dumps(fresh_rows))
+        return _Ran(0, "switched to %s" % cmd[-1])
+
+    return calls, run
+
+
+def usage_reads(calls):
+    return [c for c in calls if "usage" in c]
+
+
+def switches(calls):
+    return [c[-1] for c in calls if "switch" in c]
+
+
+def stale(slug, label, percent, active=False):
+    """A cached reading old enough that nothing can be ranked on it."""
+    return {"slug": slug, "label": label, "active": active,
+            "at": time.time() - 4 * 3600,
+            "windows": [{"label": "session", "percent": percent,
+                         "resets_at": time.time() + 3600}]}
+
+
+def fresh(slug, label, percent):
+    return {"kind": "claude", "slug": slug, "label": label, "active": False,
+            "state": "live", "at": time.time(),
+            "windows": [{"label": "session", "percent": percent,
+                         "resets_at": time.time() + 3600}]}
+
+
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+
+print("\nwith one candidate there is nothing to choose, so nothing is read")
+a_successful_switch()
+A.ROTATE_PROFILES = ["only"]
+A._switch_profiles = lambda script, kind: [
+    stale("live", "Live", 100, active=True), stale("only", "Only", 100)]
+calls, A.subprocess.run = recorder([])
+check("it switched", A.rotate_account("claude") is True)
+check("the accounts were not read again", usage_reads(calls) == [],
+      str(usage_reads(calls)))
+
+print("\nwith a choice to make, it takes one fresh reading first")
+a_successful_switch()
+A.ROTATE_PROFILES = ["spent", "free"]
+A._switch_profiles = lambda script, kind: [
+    stale("live", "Live", 100, active=True),
+    stale("spent", "Spent", 100), stale("free", "Free", 100)]
+calls, A.subprocess.run = recorder([fresh("spent", "Spent", 100),
+                                    fresh("free", "Free", 10)])
+A.rotate_account("claude")
+check("exactly one reading was taken", len(usage_reads(calls)) == 1,
+      str(usage_reads(calls)))
+check("it asked for the walled kind only",
+      usage_reads(calls) and usage_reads(calls)[0][-2:] == ["--kind", "claude"],
+      str(usage_reads(calls)))
+check("the fresh reading decides, not the saved order",
+      switches(calls) == ["free"], str(switches(calls)))
+
+print("\nand it does not read again inside the gap")
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([fresh("free", "Free", 10)])
+A.rotate_account("claude")
+check("a second look is skipped", usage_reads(calls) == [],
+      str(usage_reads(calls)))
+
+print("\nthe time of that reading outlives the switch it informed")
+a_successful_switch()          # this resets the profile stub, so set it again
+A.ROTATE_PROFILES = ["spent", "free"]
+A._switch_profiles = lambda script, kind: [
+    stale("live", "Live", 100, active=True),
+    stale("spent", "Spent", 100), stale("free", "Free", 100)]
+calls, A.subprocess.run = recorder([fresh("free", "Free", 10)])
+A.rotate_account("claude")
+check("last_refresh is still on record",
+      A._load(A.ROTATE_STATE, {}).get("last_refresh") is not None,
+      str(A._load(A.ROTATE_STATE, {})))
+check("and so is the switch it recorded",
+      A._load(A.ROTATE_STATE, {}).get("last_switch") is not None)
+
+print("\na reading is trusted only for the kind it was asked about")
+# The same profile names exist under both harnesses, and an account-switch too
+# old to filter answers with every kind. A codex row must never decide which
+# claude account is switched to.
+a_successful_switch()
+A.ROTATE_PROFILES = ["spent", "free"]
+A._switch_profiles = lambda script, kind: [
+    stale("live", "Live", 100, active=True),
+    stale("spent", "Spent", 100), stale("free", "Free", 100)]
+mixed = [fresh("spent", "Spent", 100), fresh("free", "Free", 10)]
+mixed[1]["kind"] = "codex"          # the same slug, the wrong harness
+calls, A.subprocess.run = recorder(mixed)
+A.rotate_account("claude")
+check("a row from another kind is not used",
+      switches(calls) == ["spent"], str(switches(calls)))
+
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"

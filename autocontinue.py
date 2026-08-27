@@ -910,6 +910,8 @@ ROTATE_PROFILES = _list("AUTOCONTINUE_ROTATE_PROFILES")
 ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
 # Past this age, an account's reading is treated as no reading at all.
 ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
+# A fresh reading is taken at most this often, however many sweeps want one.
+ROTATE_REFRESH_GAP_S = _num("AUTOCONTINUE_ROTATE_REFRESH_GAP_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -976,6 +978,48 @@ def _switch_profiles(script, kind):
     return [p for p in data if isinstance(p, dict) and p.get("slug")]
 
 
+def _rotation_candidates(profiles, tried):
+    """The profiles rotation may switch to, in the order it was handed them."""
+    return [
+        p for p in profiles
+        if p["slug"] not in tried
+        and (p["slug"].lower() in ROTATE_PROFILES
+             or (p.get("label") or "").lower() in ROTATE_PROFILES)
+    ]
+
+
+def _refresh_profiles(script, kind):
+    """What each account of one kind has left, read now rather than recalled.
+
+    The profile list serves whatever was last read, and nothing reads on a
+    timer, so by the time a wall appears the readings are usually hours old.
+    Ranking them then just re-picks the order the profiles were saved in. This
+    asks account-switch to go and look instead.
+
+    It costs a request per saved account of that kind, and a token renewal on a
+    parked one, which is why the caller asks only where the answer can change.
+    """
+    res = subprocess.run(
+        ["python3", script, "usage", "--json", "--kind", kind],
+        capture_output=True, text=True, timeout=90, env=_switch_env(),
+    )
+    if res.returncode != 0:
+        log("rotate: could not read the accounts: %s"
+            % (res.stderr or "").strip()[:200])
+        return None
+    try:
+        rows = json.loads(res.stdout or "[]")
+    except ValueError:
+        log("rotate: the account reading did not parse")
+        return None
+    # Keep only the kind that was asked about. The same profile names exist
+    # under both harnesses, and an account-switch too old to filter answers
+    # with every kind — a ChatGPT row must never decide a claude switch.
+    return [r for r in rows
+            if isinstance(r, dict) and r.get("slug")
+            and r.get("kind", kind) == kind] or None
+
+
 def _rotate_rank(profile, now):
     """Sort key for a rotation candidate, best account first.
 
@@ -1023,14 +1067,22 @@ def rotate_account(kind):
     tried = set(state.get("tried") or [])
     if live:
         tried.add(live)
-    allowed = [
-        p for p in profiles
-        if p["slug"] not in tried
-        and (p["slug"].lower() in ROTATE_PROFILES
-             or (p.get("label") or "").lower() in ROTATE_PROFILES)
-    ]
+    allowed = _rotation_candidates(profiles, tried)
     if not allowed:
         return False
+    # One fresh reading, only where it can change the answer. With a single
+    # candidate there is nothing to rank. And a reading is taken at most once
+    # per gap: a walled pane asks on every sweep, and answering each one would
+    # earn the rate limit that makes every later reading useless.
+    last_refresh = state.get("last_refresh") or 0
+    if len(allowed) > 1 and (now - last_refresh) >= ROTATE_REFRESH_GAP_S:
+        last_refresh = now
+        _save(ROTATE_STATE, dict(state, last_refresh=now))
+        reread = _refresh_profiles(script, kind)
+        if reread:
+            candidates = _rotation_candidates(reread, tried)
+            if candidates:
+                allowed = candidates
     allowed.sort(key=lambda p: _rotate_rank(p, now))
     target = allowed[0]["slug"]
     res = subprocess.run(
@@ -1045,7 +1097,8 @@ def rotate_account(kind):
     # about to be re-badged, and the windows on disk belong to the old account.
     drop_usage_cache(KIND_PROVIDER.get(kind))
     tried.add(target)
-    _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried)})
+    _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried),
+                         "last_refresh": last_refresh})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
     herdr("notification", "show", "Auto-continue switched account",
           "--body", (res.stdout or target).strip()[:200], "--sound", "none")

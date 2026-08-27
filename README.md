@@ -206,6 +206,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
+| `AUTOCONTINUE_ROTATE_REFRESH_GAP_S` | `300` | least time between fresh reads of the accounts |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
 | `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed |
@@ -333,7 +334,17 @@ known to be spent, soonest to reopen first. An unread account goes ahead of a
 spent one on purpose: a parked account is usually parked because it was left
 alone, so its window has most likely reopened, and one switch is what finds out.
 
-A reading can still be old, and an `account-switch` too old to publish one sends
+Nothing reads those accounts on a timer, so by the time a wall appears the
+numbers are usually hours old, and ranking them would just re-pick the saved
+order. Rotation therefore takes one fresh reading before it chooses — but only
+where the answer can change. With a single candidate there is nothing to rank,
+and a reading is taken at most once every `AUTOCONTINUE_ROTATE_REFRESH_GAP_S`
+seconds: a walled pane asks on every sweep, and answering each one would earn
+the rate limit that makes every later reading useless. The read covers the
+walled kind alone, so a stuck claude pane never costs a request against your
+ChatGPT accounts.
+
+A reading can still fail, and an `account-switch` too old to publish one sends
 the names alone. Rotation therefore switches, prompts, and watches, as it always
 did: if that account is spent as well, the wall returns and the next profile on
 the list is tried. One pass over the list per dry spell, then it waits for the
