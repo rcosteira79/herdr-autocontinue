@@ -528,6 +528,58 @@ check("a row from another kind is not used",
 
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
+# ---- stopping, and starting again straight after -------------------------
+#
+# `stop` signalled the daemon and returned while it was still alive. A `start`
+# behind it then read a live pid, reported "already running", and declined —
+# and a moment later the old process exited, leaving nothing watching. A
+# restart is the obvious way to pick up new code, and it silently killed the
+# watcher instead.
+
+print("\nstop waits for the daemon to actually go")
+REAL_ALIVE, REAL_KILL = A._pid_alive, os.kill
+alive = {"n": 3}          # alive for three looks, then gone
+
+
+def dying(pid):
+    alive["n"] -= 1
+    return alive["n"] > 0
+
+
+A._pid_alive = dying
+os.kill = lambda pid, sig: None
+with open(A.PIDFILE, "w") as f:
+    f.write("4242")
+rc = A.cmd_stop([])
+check("it reports success once the process is gone", rc == 0, str(rc))
+check("it waited rather than returning on the first look", alive["n"] <= 0,
+      str(alive["n"]))
+
+print("\nand says so when it does not go")
+A._pid_alive = lambda pid: True
+A.STOP_WAIT_S = 0.2
+rc = A.cmd_stop([])
+check("a process that will not die is an error", rc == 1, str(rc))
+
+print("\nrestart stops and starts inside one process")
+order = []
+A._pid_alive = REAL_ALIVE
+A.cmd_stop = lambda argv: order.append("stop") or 0
+A.ensure_daemon = lambda: order.append("start") or True
+rc = A.cmd_restart([])
+check("it stopped before it started", order == ["stop", "start"], str(order))
+check("it reports success", rc == 0, str(rc))
+
+print("\na restart still starts when nothing was running")
+order = []
+A.cmd_stop = lambda argv: order.append("stop") or 0
+A.ensure_daemon = lambda: order.append("start") or True
+check("a failed stop does not block the start",
+      A.cmd_restart([]) == 0 and order == ["stop", "start"], str(order))
+
+os.kill = REAL_KILL
+A._pid_alive = REAL_ALIVE
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
