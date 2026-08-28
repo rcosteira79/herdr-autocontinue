@@ -656,6 +656,83 @@ check("the account with room is chosen", switches(calls) == ["personal"],
 
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
+# ---- retrying, and the reset the wall already knows about ----------------
+#
+# A failed attempt replaced the wall's resume time with a backoff, throwing
+# away the reset the account had already reported. A codex pane knew its window
+# reopened at 17:27, was prompted at 13:39, and then retried on the 5m/15m/45m
+# ladder for three hours — spending every attempt it had long before the window
+# opened, and giving up before it ever could have worked.
+
+
+def walled_pane(reset_in, attempts=0, status="waiting"):
+    now = time.time()
+    return {
+        "pane_id": "w1:pA", "kind": "codex", "label": "code-review-tour",
+        "rule": "account:5h", "matched": "account window 5h at 100%",
+        "detected_at": now, "reset_at": now + reset_in,
+        "resume_at": now + reset_in + A.GRACE_S, "reason": "iso",
+        "attempts": attempts, "last_attempt": None, "status": status,
+    }
+
+
+REAL_HERDR = A.herdr
+prompts = []
+A.herdr = lambda *a, **k: (prompts.append(a) or _Ran(0)) if a[:2] == ("agent", "prompt") else _Ran(0)
+
+print("\na retry never lands before the window reopens")
+wall = walled_pane(3 * 3600)          # the account says three hours
+A._save(A.WALLS, {"w1:pA": wall})
+A.attempt_resume("w1:pA", wall, {"agent_status": "idle"})
+after = A.load_walls()["w1:pA"]
+check("the next try waits for the reset, not the backoff",
+      after["resume_at"] >= after["reset_at"],
+      "resume %ds before the reset" % (after["reset_at"] - after["resume_at"]))
+check("and clears the grace period too",
+      after["resume_at"] >= after["reset_at"] + A.GRACE_S)
+
+print("\nonce the window has opened, the backoff is what spaces the tries")
+wall = walled_pane(-600)              # reopened ten minutes ago
+A._save(A.WALLS, {"w1:pA": wall})
+A.attempt_resume("w1:pA", wall, {"agent_status": "idle"})
+after = A.load_walls()["w1:pA"]
+gap = after["resume_at"] - time.time()
+check("it backs off rather than retrying at once",
+      280 < gap < 320, "%ds" % gap)
+
+# ---- a wall that goes away on its own ------------------------------------
+#
+# The harness clears its own message when the window reopens. The wall was then
+# dropped and the pane forgotten — so an armed agent that had stopped mid-task
+# sat idle indefinitely, having never been prompted. One armed pane sat idle
+# for forty minutes that way.
+
+print("\nan armed pane is prompted when its wall disappears")
+del prompts[:]
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+A.account_block = lambda kind=None: None
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("it was prompted once", len(prompts) == 1, str(prompts))
+check("and the wall is gone", "w1:pA" not in A.load_walls())
+
+print("\nbut only when it actually stopped")
+del prompts[:]
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.tick({"w1:pA": {"agent_status": "working", "agent": "codex"}}, set())
+check("an agent that carried on is left alone", prompts == [], str(prompts))
+
+print("\nand only when you armed it")
+del prompts[:]
+A._save(A.ARMED, [])
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("an unarmed pane is never typed into", prompts == [], str(prompts))
+
+A.herdr = REAL_HERDR
+A.account_block = REAL_BLOCK
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
