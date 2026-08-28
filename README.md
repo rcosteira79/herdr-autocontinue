@@ -9,6 +9,14 @@ The reset time is right there in the message the agent printed when it blew up,
 so the watcher reads it out of the pane, sits out the window, and prods the
 agent when it is over.
 
+> **Tested with Claude Code and the Codex CLI only.** Nothing here refuses
+> another agent kind, and some of it reaches for one already: with no
+> `AUTOCONTINUE_KINDS` set, every kind herdr detects is watched, and
+> `AUTOCONTINUE_CLAUDE_KINDS` bills `omp` to the Claude account by default. None
+> of that is exercised. The wall wording, the account windows and the resume
+> prompt are all written against those two CLIs, so treat any other kind as
+> untested rather than supported.
+
 ## What it does
 
 - **Detect** — every claude/codex pane is read each poll. A pane showing a
