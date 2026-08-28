@@ -214,6 +214,8 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
 | `AUTOCONTINUE_ROTATE_GAIN_S` | `300` | how much sooner another account must reopen to be worth a switch |
+| `AUTOCONTINUE_ROTATE_REFUSED_S` | `21600` | backstop before a refused profile is tried again |
+| `AUTOCONTINUE_NUDGE_GAP_S` | `120` | quiet period after a prompt before a nudge may follow |
 | `AUTOCONTINUE_ROTATE_REFRESH_GAP_S` | `300` | least time between fresh reads of the accounts |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
@@ -368,7 +370,20 @@ soonest reset. The list resets once the account has capacity again.
 It does know whether the login still **works**. `account-switch` renews a parked
 profile and asks the provider before installing it, and refuses a switch the
 provider turns down. So rotation cannot land you on a retired login and sign you
-out; a refused switch is logged and the next profile is tried.
+out.
+
+A refused profile is then left alone until that login is **saved afresh**. The
+refusal is remembered against the profile's `saved_at`, so logging the account
+in again and saving it clears it on the next sweep, with nothing to wait out.
+Nothing else expires it, except `AUTOCONTINUE_ROTATE_REFUSED_S` as a backstop
+for a refusal that was never about the credential — a network blip should not
+strand an account until someone thinks to re-save it. A refused switch also
+records the attempt, so the cooldown applies: it used to write nothing down and
+ask again every sweep, refusing the same dead login five times in two minutes.
+
+A profile `account-switch` reports a `problem` for — "needs re-login" is the one
+that matters — is skipped outright. It cannot be read, so it cannot be switched
+to either.
 
 `AUTOCONTINUE_ROTATE_COOLDOWN_S` (default 300) is the minimum gap between
 switches, so a bad detection cannot flip accounts in a loop.

@@ -918,6 +918,11 @@ ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
 ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
 # How much sooner another account must reopen before it is worth a switch.
 ROTATE_GAIN_S = _num("AUTOCONTINUE_ROTATE_GAIN_S", 300.0)
+# A refusal lasts until that login is saved afresh. This is only the backstop
+# for a refusal that was never about the credential at all.
+ROTATE_REFUSED_S = _num("AUTOCONTINUE_ROTATE_REFUSED_S", 6 * 3600.0)
+# A pane prompted this recently is not prompted again by the nudge.
+NUDGE_GAP_S = _num("AUTOCONTINUE_NUDGE_GAP_S", 120.0)
 # A fresh reading is taken at most this often, however many sweeps want one.
 ROTATE_REFRESH_GAP_S = _num("AUTOCONTINUE_ROTATE_REFRESH_GAP_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
@@ -995,9 +1000,33 @@ def _rotation_candidates(profiles):
     """
     return [
         p for p in profiles
-        if p["slug"].lower() in ROTATE_PROFILES
-        or (p.get("label") or "").lower() in ROTATE_PROFILES
+        if (p["slug"].lower() in ROTATE_PROFILES
+            or (p.get("label") or "").lower() in ROTATE_PROFILES)
+        # A profile account-switch cannot read is one it cannot switch to
+        # either. It says so as `problem`, and "needs re-login" names exactly
+        # the account rotation kept reaching for.
+        and not p.get("problem")
     ]
+
+
+def _is_refused(profile, refused, now):
+    """True while this profile's saved login is one a switch already refused.
+
+    Keyed on `saved_at`, so the refusal lasts exactly as long as the credential
+    that earned it: log the account in again, save it, and the profile is
+    trusted on the next sweep with nothing to wait out. The age check is only a
+    backstop for a refusal that was never about the credential — a network blip
+    should not strand an account until someone thinks to re-save it.
+    """
+    mark = refused.get(profile["slug"])
+    if not isinstance(mark, dict):
+        return False
+    if (now - (mark.get("at") or 0)) >= ROTATE_REFUSED_S:
+        return False
+    saved_at = profile.get("saved_at")
+    if saved_at is None or mark.get("saved_at") is None:
+        return True                     # nothing to compare; trust the age
+    return saved_at == mark["saved_at"]
 
 
 def _worth_moving(live, best):
@@ -1092,7 +1121,9 @@ def rotate_account(kind):
     profiles = _switch_profiles(script, kind)
     if not profiles:
         return False
-    named = _rotation_candidates(profiles)
+    refused = state.get("refused") or {}
+    named = [p for p in _rotation_candidates(profiles)
+             if not _is_refused(p, refused, now)]
     if not named:
         return False
     # One fresh reading, only where it can change the answer. With a single
@@ -1104,7 +1135,8 @@ def rotate_account(kind):
         last_refresh = now
         _save(ROTATE_STATE, dict(state, last_refresh=now))
         reread = _refresh_profiles(script, kind)
-        fresh = _rotation_candidates(reread or [])
+        fresh = [p for p in _rotation_candidates(reread or [])
+                 if not _is_refused(p, refused, now)]
         if fresh:
             # The reading does not say which profile the switch command would
             # call live, so carry that answer over from the list that does.
@@ -1125,13 +1157,22 @@ def rotate_account(kind):
         capture_output=True, text=True, timeout=60, env=_switch_env(),
     )
     if res.returncode != 0:
-        log("rotate: switch to %s failed: %s"
-            % (target, (res.stderr or "").strip()[:200]))
+        # Remember it, or the next sweep asks again and the same dead login is
+        # refused every minute. Recording the attempt engages the cooldown too:
+        # only a successful switch used to write anything down.
+        marks = dict(refused)
+        marks[target] = {"saved_at": best.get("saved_at"), "at": now}
+        _save(ROTATE_STATE, dict(state, refused=marks, last_attempt=now,
+                                 last_refresh=last_refresh))
+        log("rotate: %s refused, leaving it be until it is saved again: %s"
+            % (target, (res.stderr or "").strip()[:160]))
         return False
     # Before anything else reads the account: the pane that triggered this is
     # about to be re-badged, and the windows on disk belong to the old account.
     drop_usage_cache(KIND_PROVIDER.get(kind))
-    _save(ROTATE_STATE, {"last_switch": now, "last_refresh": last_refresh})
+    kept = {k: v for k, v in refused.items() if k != target}
+    _save(ROTATE_STATE, {"last_switch": now, "last_refresh": last_refresh,
+                         "refused": kept})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
     herdr("notification", "show", "Auto-continue switched account",
           "--body", (res.stdout or target).strip()[:200], "--sound", "none")
@@ -1251,7 +1292,10 @@ def tick(agents, pending):
                 # armed one on the way out: dropping the wall quietly is what
                 # left armed panes sitting idle for hours after their window
                 # came back.
+                just_prompted = (
+                    now - (wall.get("last_attempt") or 0)) < NUDGE_GAP_S
                 if (pane_id in armed and wall.get("status") == "waiting"
+                        and not just_prompted
                         and info.get("agent_status") not in ("working", "blocked")):
                     log("%s: the wall went away on its own; nudging it" % pane_id)
                     attempt_resume(pane_id, wall, info)
