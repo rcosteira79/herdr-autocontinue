@@ -207,6 +207,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
+| `AUTOCONTINUE_ROTATE_GAIN_S` | `300` | how much sooner another account must reopen to be worth a switch |
 | `AUTOCONTINUE_ROTATE_REFRESH_GAP_S` | `300` | least time between fresh reads of the accounts |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
@@ -334,6 +335,13 @@ room first, then one nobody has read in the last half hour, then the accounts
 known to be spent, soonest to reopen first. An unread account goes ahead of a
 spent one on purpose: a parked account is usually parked because it was left
 alone, so its window has most likely reopened, and one switch is what finds out.
+
+Every named account is ranked, **including the one it is already on**. That
+matters most when the account it moved to turns out to be the worse of the two:
+your personal session may reopen in an hour while the account you switched to
+has a spent weekly and twenty hours to run. Rotation moves back. It only moves
+for an account that is better by `AUTOCONTINUE_ROTATE_GAIN_S`, which is what
+stops it flapping between two that reopen at much the same time.
 
 Nothing reads those accounts on a timer, so by the time a wall appears the
 numbers are usually hours old, and ranking them would just re-pick the saved
