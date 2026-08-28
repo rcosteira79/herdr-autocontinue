@@ -580,6 +580,82 @@ check("a failed stop does not block the start",
 os.kill = REAL_KILL
 A._pid_alive = REAL_ALIVE
 
+# ---- going back to an account that reopens sooner ------------------------
+#
+# Rotation crossed each profile off as it tried it, the account it was leaving
+# included, so it could never return to one. Personal walled with its session
+# an hour and a half from resetting, rotation moved to Mindera, and Mindera's
+# weekly was spent for another twenty hours. Every armed pane then waited on
+# the worse of the two accounts overnight.
+
+
+def account(slug, label, reopens_in, active=False, read_ago=0):
+    """A profile whose binding window reopens `reopens_in` seconds from now.
+
+    `reopens_in` of None means it has room right now.
+    """
+    now = time.time()
+    windows = ([] if reopens_in is None else
+               [{"label": "session", "percent": 100,
+                 "resets_at": now + reopens_in}])
+    if reopens_in is None:
+        windows = [{"label": "session", "percent": 12,
+                    "resets_at": now + 3600}]
+    return {"slug": slug, "label": label, "active": active,
+            "at": now - read_ago, "windows": windows}
+
+
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+
+print("\nit goes back to the account that reopens first")
+a_successful_switch()
+A.ROTATE_PROFILES = ["personal", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("personal", "Personal", 94 * 60),          # resets in 1h34
+    account("mindera", "Mindera", 20 * 3600 + 34 * 60, active=True)]
+# It was left behind on an earlier switch, and that must not rule it out.
+A._save(A.ROTATE_STATE, {"tried": ["personal", "mindera"],
+                         "last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+check("it switched back", A.rotate_account("claude") is True)
+check("and to the sooner account", switches(calls) == ["personal"],
+      str(switches(calls)))
+
+print("\nbut it stays put when it is already on the best one")
+a_successful_switch()
+A.ROTATE_PROFILES = ["personal", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("personal", "Personal", 94 * 60, active=True),
+    account("mindera", "Mindera", 20 * 3600)]
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+check("no switch is made", A.rotate_account("claude") is False)
+check("and nothing was switched to", switches(calls) == [], str(switches(calls)))
+
+print("\na barely sooner account is not worth the move")
+a_successful_switch()
+A.ROTATE_PROFILES = ["personal", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("personal", "Personal", 60 * 60 - 30),     # thirty seconds sooner
+    account("mindera", "Mindera", 60 * 60, active=True)]
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+check("it holds its ground", A.rotate_account("claude") is False)
+
+print("\nan account with room beats one that is merely sooner")
+a_successful_switch()
+A.ROTATE_PROFILES = ["personal", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("personal", "Personal", None),             # has room now
+    account("mindera", "Mindera", 60, active=True)]
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+A.rotate_account("claude")
+check("the account with room is chosen", switches(calls) == ["personal"],
+      str(switches(calls)))
+
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))

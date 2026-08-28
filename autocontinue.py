@@ -903,15 +903,21 @@ def _backoff(attempts):
 # were saved: an account with room first, then one nobody has read lately, then
 # the accounts known to be spent, soonest to reopen first.
 #
+# Every named account is ranked, the live one included, and rotation moves to
+# whichever reopens first. It used to cross a profile off as it tried it — the
+# account it was leaving among them — so it could not go back to an account
+# that reopened sooner, and a fleet could sit out the night on the worse of two.
+#
 # A reading can still be old, and no reading at all is normal. Rotation
-# therefore switches and watches, as it always did: if the new account is spent
-# too the wall comes back and the next profile is tried, up to one pass over
-# the list.
+# therefore switches and watches: if the new account is spent too, the wall
+# comes back and the ranking is asked again.
 
 ROTATE_PROFILES = _list("AUTOCONTINUE_ROTATE_PROFILES")
 ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
 # Past this age, an account's reading is treated as no reading at all.
 ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
+# How much sooner another account must reopen before it is worth a switch.
+ROTATE_GAIN_S = _num("AUTOCONTINUE_ROTATE_GAIN_S", 300.0)
 # A fresh reading is taken at most this often, however many sweeps want one.
 ROTATE_REFRESH_GAP_S = _num("AUTOCONTINUE_ROTATE_REFRESH_GAP_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
@@ -980,14 +986,30 @@ def _switch_profiles(script, kind):
     return [p for p in data if isinstance(p, dict) and p.get("slug")]
 
 
-def _rotation_candidates(profiles, tried):
-    """The profiles rotation may switch to, in the order it was handed them."""
+def _rotation_candidates(profiles):
+    """The profiles rotation may use, the live one included.
+
+    Crossing a profile off once it had been tried is what stranded the fleet on
+    the worse account: the account being left was crossed off too, so rotation
+    could never go back to it however soon it reopened.
+    """
     return [
         p for p in profiles
-        if p["slug"] not in tried
-        and (p["slug"].lower() in ROTATE_PROFILES
-             or (p.get("label") or "").lower() in ROTATE_PROFILES)
+        if p["slug"].lower() in ROTATE_PROFILES
+        or (p.get("label") or "").lower() in ROTATE_PROFILES
     ]
+
+
+def _worth_moving(live, best):
+    """True when `best` beats the live account by enough to justify a switch.
+
+    A better band always wins: an account with room beats one that is merely
+    due sooner. Within a band the gain has to clear ROTATE_GAIN_S, so two
+    accounts reopening at much the same time do not make it flap between them.
+    """
+    if best[0] != live[0]:
+        return best[0] < live[0]
+    return best[1] <= live[1] - ROTATE_GAIN_S
 
 
 def _refresh_profiles(script, kind):
@@ -1047,10 +1069,15 @@ def _rotate_rank(profile, now):
 
 
 def rotate_account(kind):
-    """Switch to the next allowed profile with capacity. True when it switched.
+    """Switch to whichever named account reopens first. True when it switched.
 
-    Returns False when rotation is off, unavailable, on cooldown, or every
-    named profile has already been tried since the account ran out.
+    Every named profile is ranked, the live one included, so the account just
+    left is still a candidate — it is often the one that reopens soonest, and
+    excluding it is what stranded a fleet on the worse of two accounts.
+
+    Returns False when rotation is off, unavailable, on cooldown, when the live
+    account is already the one that reopens first, or when the best of the rest
+    does not beat it by ROTATE_GAIN_S.
     """
     if not ROTATE_PROFILES:
         return False
@@ -1065,28 +1092,34 @@ def rotate_account(kind):
     profiles = _switch_profiles(script, kind)
     if not profiles:
         return False
-    live = next((p["slug"] for p in profiles if p.get("active")), None)
-    tried = set(state.get("tried") or [])
-    if live:
-        tried.add(live)
-    allowed = _rotation_candidates(profiles, tried)
-    if not allowed:
+    named = _rotation_candidates(profiles)
+    if not named:
         return False
     # One fresh reading, only where it can change the answer. With a single
     # candidate there is nothing to rank. And a reading is taken at most once
     # per gap: a walled pane asks on every sweep, and answering each one would
     # earn the rate limit that makes every later reading useless.
     last_refresh = state.get("last_refresh") or 0
-    if len(allowed) > 1 and (now - last_refresh) >= ROTATE_REFRESH_GAP_S:
+    if len(named) > 1 and (now - last_refresh) >= ROTATE_REFRESH_GAP_S:
         last_refresh = now
         _save(ROTATE_STATE, dict(state, last_refresh=now))
         reread = _refresh_profiles(script, kind)
-        if reread:
-            candidates = _rotation_candidates(reread, tried)
-            if candidates:
-                allowed = candidates
-    allowed.sort(key=lambda p: _rotate_rank(p, now))
-    target = allowed[0]["slug"]
+        fresh = _rotation_candidates(reread or [])
+        if fresh:
+            # The reading does not say which profile the switch command would
+            # call live, so carry that answer over from the list that does.
+            active = {p["slug"] for p in profiles if p.get("active")}
+            for profile in fresh:
+                profile["active"] = profile["slug"] in active
+            named = fresh
+    live = next((p for p in named if p.get("active")), None)
+    best = min(named, key=lambda p: _rotate_rank(p, now))
+    if live is not None:
+        if best["slug"] == live["slug"]:
+            return False        # already on the account that reopens first
+        if not _worth_moving(_rotate_rank(live, now), _rotate_rank(best, now)):
+            return False
+    target = best["slug"]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],
         capture_output=True, text=True, timeout=60, env=_switch_env(),
@@ -1098,21 +1131,11 @@ def rotate_account(kind):
     # Before anything else reads the account: the pane that triggered this is
     # about to be re-badged, and the windows on disk belong to the old account.
     drop_usage_cache(KIND_PROVIDER.get(kind))
-    tried.add(target)
-    _save(ROTATE_STATE, {"last_switch": now, "tried": sorted(tried),
-                         "last_refresh": last_refresh})
+    _save(ROTATE_STATE, {"last_switch": now, "last_refresh": last_refresh})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
     herdr("notification", "show", "Auto-continue switched account",
           "--body", (res.stdout or target).strip()[:200], "--sound", "none")
     return True
-
-
-def clear_rotation_state():
-    """Called once the account has capacity again, so the next dry spell starts
-    from a full list rather than one already crossed off."""
-    if _load(ROTATE_STATE, {}).get("tried"):
-        _save(ROTATE_STATE, {})
-        log("rotate: account has capacity again, profile list reset")
 
 
 def attempt_resume(pane_id, wall, info):
@@ -1185,11 +1208,6 @@ def tick(agents, pending):
             log("disarmed %s (pane gone for %d polls)"
                 % (", ".join(sorted(dead)), ABSENT_POLLS))
 
-    # Rotation only ever moves claude accounts, so it is that account's
-    # recovery that resets the list.
-    if ROTATE_PROFILES and not account_block("claude"):
-        clear_rotation_state()
-
     for pane_id, info in agents.items():
         kind = kind_of(info)
         if kind is None:
@@ -1251,7 +1269,7 @@ def tick(agents, pending):
                 and kind in ACCOUNT_KINDS and account_block(kind)
                 and rotate_account(kind)):
             # The account we just moved to may be spent as well. Prompting is
-            # how that shows: the wall returns and the next profile is tried.
+            # how that shows: the wall returns and the ranking is asked again.
             attempt_resume(pane_id, wall, info)
             continue
 
