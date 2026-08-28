@@ -733,6 +733,108 @@ check("an unarmed pane is never typed into", prompts == [], str(prompts))
 A.herdr = REAL_HERDR
 A.account_block = REAL_BLOCK
 
+# ---- not reaching for an account that cannot work ------------------------
+#
+# A switch the provider refuses recorded nothing, so the cooldown never
+# engaged and the same dead login was tried on every sweep — five times in two
+# minutes. When it finally went through, the account it landed on had its own
+# session spent, and its row had said so: account-switch reports a profile it
+# cannot read as needing a re-login.
+
+print("\na refused switch is not retried on the next sweep")
+a_successful_switch()
+A.ROTATE_PROFILES = ["spare"]
+SAVED_AT = 1787751156
+
+
+def profiles_with(saved_at):
+    return lambda script, kind: [
+        {"slug": "main", "label": "Main", "active": True},
+        {"slug": "spare", "label": "Spare", "active": False,
+         "saved_at": saved_at}]
+
+
+A._switch_profiles = profiles_with(SAVED_AT)
+attempts = []
+
+
+def refusing(cmd, **kwargs):
+    if "switch" in cmd:
+        attempts.append(cmd[-1])
+        return _Ran(1, "", "codex: Spare was refused — nothing changed; "
+                           "log that account in again and save it")
+    return _Ran(0, "[]")
+
+
+A.subprocess.run = refusing
+check("the switch is reported as failed", A.rotate_account("claude") is False)
+check("one attempt was made", attempts == ["spare"], str(attempts))
+check("a second sweep does not try it again",
+      A.rotate_account("claude") is False and attempts == ["spare"], str(attempts))
+refused = A._load(A.ROTATE_STATE, {}).get("refused") or {}
+check("the refusal remembers which saved login was refused",
+      (refused.get("spare") or {}).get("saved_at") == SAVED_AT, str(refused))
+
+print("\nand is trusted again the moment that login is saved afresh")
+# Logging the account in again and saving it moves saved_at. Nothing else has
+# to expire: the profile is unusable exactly as long as it is the same dead
+# credential, which is what the refusal was about.
+A._switch_profiles = profiles_with(SAVED_AT + 1)
+del attempts[:]
+A.rotate_account("claude")
+check("it is tried once more", attempts == ["spare"], str(attempts))
+
+print("\na refusal that was never a dead login still lets go eventually")
+A._switch_profiles = profiles_with(SAVED_AT)
+state = A._load(A.ROTATE_STATE, {})
+state["refused"] = {"spare": {"saved_at": SAVED_AT,
+                              "at": time.time() - A.ROTATE_REFUSED_S - 1}}
+state.pop("last_switch", None)
+state.pop("last_attempt", None)
+A._save(A.ROTATE_STATE, state)
+del attempts[:]
+A.rotate_account("claude")
+check("a stale refusal does not strand it forever", attempts == ["spare"],
+      str(attempts))
+
+print("\nan account that cannot be read is not chosen")
+a_successful_switch()
+A.ROTATE_PROFILES = ["broken", "ok"]
+A._switch_profiles = lambda script, kind: [
+    {"slug": "live", "label": "Live", "active": True},
+    {"slug": "broken", "label": "Broken", "active": False,
+     "problem": "needs re-login", "at": time.time(), "windows": []},
+    {"slug": "ok", "label": "Ok", "active": False, "at": time.time(),
+     "windows": [{"label": "session", "percent": 5,
+                  "resets_at": time.time() + 3600}]}]
+calls, A.subprocess.run = recorder([])
+A.rotate_account("claude")
+check("the readable account is chosen", switches(calls) == ["ok"],
+      str(switches(calls)))
+
+print("\na pane just prompted is not prompted again by the nudge")
+# a_successful_switch replaces herdr, so put the prompt recorder back first.
+A.herdr = lambda *a, **k: (
+    (prompts.append(a) or _Ran(0)) if a[:2] == ("agent", "prompt") else _Ran(0))
+del prompts[:]
+A._save(A.ARMED, ["w1:pA"])
+wall = walled_pane(3600)
+wall["last_attempt"] = time.time()          # a switch prompted it a moment ago
+A._save(A.WALLS, {"w1:pA": wall})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+A.account_block = lambda kind=None: None
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("no second prompt", prompts == [], str(prompts))
+
+print("\nbut one that was never prompted still gets its nudge")
+del prompts[:]
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("it is nudged once", len(prompts) == 1, str(prompts))
+
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
+A.account_block = REAL_BLOCK
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))
