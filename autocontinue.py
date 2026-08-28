@@ -1170,7 +1170,16 @@ def attempt_resume(pane_id, wall, info):
             entry["status"] = "gaveup"
             log(f"{pane_id}: giving up after {attempts} attempts")
         else:
-            entry["resume_at"] = now + _backoff(attempts)
+            # Never retry before the account says the window reopens. The
+            # backoff spaces the tries once it has; left to itself it replaced
+            # the reset the wall already knew about, so a three-hour wait was
+            # retried on a 5m/15m/45m ladder that spent every attempt hours
+            # early and gave up before the window could open.
+            nudge = now + _backoff(attempts)
+            reset_at = entry.get("reset_at")
+            if reset_at:
+                nudge = max(nudge, reset_at + GRACE_S)
+            entry["resume_at"] = nudge
 
     _update_walls(mutate)
 
@@ -1237,6 +1246,15 @@ def tick(agents, pending):
                 )
         if hit is None:
             if wall:
+                # The harness clears its own message when the window reopens,
+                # and an agent that stopped mid-task is still stopped. Prompt an
+                # armed one on the way out: dropping the wall quietly is what
+                # left armed panes sitting idle for hours after their window
+                # came back.
+                if (pane_id in armed and wall.get("status") == "waiting"
+                        and info.get("agent_status") not in ("working", "blocked")):
+                    log("%s: the wall went away on its own; nudging it" % pane_id)
+                    attempt_resume(pane_id, wall, info)
                 drop_wall(pane_id, "message gone")
             pending.discard(pane_id)
             refresh_badge(pane_id, None, armed)

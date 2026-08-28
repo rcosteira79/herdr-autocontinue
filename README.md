@@ -18,7 +18,13 @@ agent when it is over.
   reopens. Nothing is ever typed into a pane you did not arm.
 - **Back off** — if the wall is still up (the parse was off, or it was the
   weekly limit and not the 5-hour one), it retries on a widening delay and
-  gives up after five attempts instead of hammering the pane.
+  gives up after five attempts instead of hammering the pane. A retry never
+  lands before the reset the wall already knows about: the delay spaces the
+  tries once the window has reopened, it does not replace the reopening.
+- **Nudge** — the harness clears its own limit message when the window comes
+  back, and an agent that stopped mid-task is still stopped. An armed pane is
+  prompted once as its wall goes away, so a wall that ends quietly does not
+  leave the agent sitting idle.
 - **Follow the account** — a wall is stamped with the reopening it was told
   about when it was first seen, and that answer can turn out to be too late:
   rotation moves the pane onto another account, or the account revises its own
