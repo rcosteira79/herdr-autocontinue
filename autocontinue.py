@@ -492,6 +492,12 @@ def _set_token(pane_id, text):
 def set_badge(pane_id, wall, armed):
     if wall["status"] == "gaveup":
         text = GLYPH_GAVEUP
+    elif wall.get("stranded") and pane_id not in armed:
+        # The account moved out from under this pane and nothing here will type
+        # into one nobody armed. Its own harness was going to restart it against
+        # an account that is no longer installed, so a countdown here would be
+        # a promise from something that has stopped watching the clock for it.
+        text = GLYPH_GAVEUP
     else:
         glyph = GLYPH_ARMED if pane_id in armed else GLYPH_IDLE
         text = glyph + _countdown(wall["resume_at"] - time.time())
@@ -528,6 +534,23 @@ def _update_walls(mutate):
         result = mutate(walls)
         save_walls(walls)
         return result
+
+
+def strand_walls(kind):
+    """Mark every wall of a kind as one the account moved out from under.
+
+    A switch is machine-wide, and it lands on panes nobody armed as well. Those
+    are watched and never typed into, so the plugin will not restart them, and
+    the harness that was going to do it itself now holds another account's
+    credentials. The badge says so instead of counting down to a resume that is
+    not coming.
+    """
+    def mutate(walls):
+        for entry in walls.values():
+            if entry.get("kind") == kind:
+                entry["stranded"] = True
+
+    _update_walls(mutate)
 
 
 def drop_wall(pane_id, why):
@@ -808,6 +831,22 @@ def account_block(kind=None):
     return soonest["resets_at"], soonest.get("kind"), soonest.get("percent")
 
 
+def account_unknown(kind=None):
+    """True when the account behind a kind could not be read at all.
+
+    An empty answer means two very different things: the account has room, or
+    nobody could ask it. A switch drops the cached windows on purpose, and a
+    reading that is rate limited right after leaves nothing behind — reading
+    that as "the account has room" cleared every account wall at once and left
+    the armed panes with nothing to fire at the reset.
+    """
+    provider = KIND_PROVIDER.get(kind) if kind else "claude"
+    if not USE_ACCOUNT or not provider:
+        return False
+    cached = (_load(USAGE_CACHE, {}) or {}).get(provider) or {}
+    return cached.get("windows") is None
+
+
 def account_reset_for(kind):
     """The soonest reset that kind's account knows about, for a blank time."""
     provider = KIND_PROVIDER.get(kind)
@@ -918,11 +957,18 @@ ROTATE_COOLDOWN_S = _num("AUTOCONTINUE_ROTATE_COOLDOWN_S", 300.0)
 ROTATE_STALE_S = _num("AUTOCONTINUE_ROTATE_STALE_S", 1800.0)
 # How much sooner another account must reopen before it is worth a switch.
 ROTATE_GAIN_S = _num("AUTOCONTINUE_ROTATE_GAIN_S", 300.0)
+# How long the live account may still have to run before an account nobody
+# could read is worth one switch to find out.
+ROTATE_UNKNOWN_HORIZON_S = _num("AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S", 900.0)
+# And how long that guess stands, so the same unknown is not tried on a loop.
+ROTATE_GUESS_GAP_S = _num("AUTOCONTINUE_ROTATE_GUESS_GAP_S", 3600.0)
 # A refusal lasts until that login is saved afresh. This is only the backstop
 # for a refusal that was never about the credential at all.
 ROTATE_REFUSED_S = _num("AUTOCONTINUE_ROTATE_REFUSED_S", 6 * 3600.0)
 # A pane prompted this recently is not prompted again by the nudge.
 NUDGE_GAP_S = _num("AUTOCONTINUE_NUDGE_GAP_S", 120.0)
+# How long a wall waits over when the agent is busy or waiting on you.
+BUSY_RETRY_S = _num("AUTOCONTINUE_BUSY_RETRY_S", 60.0)
 # A fresh reading is taken at most this often, however many sweeps want one.
 ROTATE_REFRESH_GAP_S = _num("AUTOCONTINUE_ROTATE_REFRESH_GAP_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
@@ -1041,6 +1087,30 @@ def _worth_moving(live, best):
     return best[1] <= live[1] - ROTATE_GAIN_S
 
 
+def _switch_is_due(live, best, now, state):
+    """False while the better account is not worth moving to *yet*.
+
+    Two answers wait rather than switch. An account that is spent but reopens
+    sooner is worth having when it reopens, not hours before: switching early
+    puts every pane on the machine onto it for the rest of its window, and
+    takes the restart away from a harness that may still do it itself. And an
+    account nobody could read is a guess — worth one switch while the live
+    account has hours to run, never while it is about to come back on its own,
+    and never twice in the same dry spell.
+    """
+    band, resets_at = _rotate_rank(best, now)
+    if band == 2:
+        return now >= resets_at
+    if band == 1:
+        guessed = (state.get("guessed") or {}).get(best["slug"]) or 0
+        if (now - guessed) < ROTATE_GUESS_GAP_S:
+            return False
+        live_band, live_resets = _rotate_rank(live, now)
+        if live_band == 2 and (live_resets - now) <= ROTATE_UNKNOWN_HORIZON_S:
+            return False
+    return True
+
+
 def _refresh_profiles(script, kind):
     """What each account of one kind has left, read now rather than recalled.
 
@@ -1151,6 +1221,8 @@ def rotate_account(kind):
             return False        # already on the account that reopens first
         if not _worth_moving(_rotate_rank(live, now), _rotate_rank(best, now)):
             return False
+        if not _switch_is_due(live, best, now, state):
+            return False
     target = best["slug"]
     res = subprocess.run(
         ["python3", script, "switch", kind, target],
@@ -1170,24 +1242,57 @@ def rotate_account(kind):
     # Before anything else reads the account: the pane that triggered this is
     # about to be re-badged, and the windows on disk belong to the old account.
     drop_usage_cache(KIND_PROVIDER.get(kind))
+    strand_walls(kind)
     kept = {k: v for k, v in refused.items() if k != target}
+    # A switch onto an account nobody could read is a guess, and it is written
+    # down as one: the answer it buys is the reading that follows, and without
+    # the mark a reading that never comes would have it guessed again every
+    # cooldown.
+    guessed = dict(state.get("guessed") or {})
+    if _rotate_rank(best, now)[0] == 1:
+        guessed[target] = now
     _save(ROTATE_STATE, {"last_switch": now, "last_refresh": last_refresh,
-                         "refused": kept})
+                         "refused": kept, "guessed": guessed})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
     herdr("notification", "show", "Auto-continue switched account",
           "--body", (res.stdout or target).strip()[:200], "--sound", "none")
     return True
 
 
+def keep_wall(pane_id, wall, armed):
+    """True when a wall whose evidence went away is kept anyway.
+
+    An armed pane's wall is the only record that the agent stopped behind one
+    and has not been continued since. The evidence can go for reasons that have
+    nothing to do with the window reopening — an account reading that failed, a
+    switch that emptied the cache, a prompt drawn over the message — and
+    forgetting the wall then left the agent parked with its reset time already
+    known and recorded. Only the agent moving again ends a wall, and `tick`
+    handles that before this is reached. An unarmed pane is watched and never
+    typed into, so nothing is held for it.
+    """
+    return pane_id in armed and wall.get("status") == "waiting"
+
+
+def defer_wall(pane_id, until):
+    """Hold a wall over, without ever pulling its resume time earlier."""
+    _update_walls(lambda w: w.get(pane_id, {}).update(
+        resume_at=max(w.get(pane_id, {}).get("resume_at") or 0, until)))
+
+
 def attempt_resume(pane_id, wall, info):
-    """Type into an armed pane whose window should have reopened. The caller
-    has already confirmed, this tick, that the wall is still on screen."""
+    """Type into an armed pane whose window should have reopened.
+
+    The caller has confirmed, this tick, that the pane is armed and that its
+    wall still stands — either the message is on screen, or the wall is one
+    `keep_wall` held when the evidence for it went away.
+    """
     now = time.time()
     if wall.get("status") != "waiting":
         return  # already gave up; only an explicit resume from the list revives it
     if info.get("agent_status") in ("working", "blocked"):
         # Busy or waiting on you — never interrupt; look again shortly.
-        _update_walls(lambda w: w.get(pane_id, {}).update(resume_at=now + 60))
+        defer_wall(pane_id, now + BUSY_RETRY_S)
         return
     if DRY_RUN:
         log(f"{pane_id}: DRY RUN, would submit {PROMPT_TEXT!r}")
@@ -1285,20 +1390,35 @@ def tick(agents, pending):
                     "account window %s at %s%%" % (window, percent),
                     "resets %s" % datetime.fromtimestamp(resets_at).isoformat(),
                 )
+        if (hit is None and wall
+                and str(wall.get("rule") or "").startswith("account:")
+                and account_unknown(kind)):
+            # The account could not be asked, which is not the answer "it has
+            # room". The wall it raised stands until someone can ask again, or
+            # until the reset it already carries arrives.
+            hit = (wall["rule"], wall["matched"], "")
+
         if hit is None:
-            if wall:
+            if wall and keep_wall(pane_id, wall, armed):
                 # The harness clears its own message when the window reopens,
                 # and an agent that stopped mid-task is still stopped. Prompt an
                 # armed one on the way out: dropping the wall quietly is what
                 # left armed panes sitting idle for hours after their window
                 # came back.
-                just_prompted = (
-                    now - (wall.get("last_attempt") or 0)) < NUDGE_GAP_S
-                if (pane_id in armed and wall.get("status") == "waiting"
-                        and not just_prompted
-                        and info.get("agent_status") not in ("working", "blocked")):
+                if info.get("agent_status") == "blocked":
+                    # Waiting on you, so it is never typed into. The wall it
+                    # stopped at is still ours to remember: forgetting it here
+                    # is what let a reset arrive with nothing left to fire.
+                    defer_wall(pane_id, now + BUSY_RETRY_S)
+                elif (now - (wall.get("last_attempt") or 0)) >= NUDGE_GAP_S:
                     log("%s: the wall went away on its own; nudging it" % pane_id)
                     attempt_resume(pane_id, wall, info)
+                wall = load_walls().get(pane_id)
+                if wall:
+                    set_badge(pane_id, wall, armed)
+                    pending.discard(pane_id)
+                    continue
+            if wall:
                 drop_wall(pane_id, "message gone")
             pending.discard(pane_id)
             refresh_badge(pane_id, None, armed)

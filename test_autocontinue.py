@@ -587,6 +587,10 @@ A._pid_alive = REAL_ALIVE
 # an hour and a half from resetting, rotation moved to Mindera, and Mindera's
 # weekly was spent for another twenty hours. Every armed pane then waited on
 # the worse of the two accounts overnight.
+#
+# It goes back, but on the clock rather than at once. Two spent accounts do the
+# same amount of work — none — so the switch is worth making when the sooner
+# window actually reopens, and not an hour and a half before.
 
 
 def account(slug, label, reopens_in, active=False, read_ago=0):
@@ -607,7 +611,7 @@ def account(slug, label, reopens_in, active=False, read_ago=0):
 
 REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
 
-print("\nit goes back to the account that reopens first")
+print("\nit does not move to a spent account before that account reopens")
 a_successful_switch()
 A.ROTATE_PROFILES = ["personal", "mindera"]
 A._switch_profiles = lambda script, kind: [
@@ -617,9 +621,54 @@ A._switch_profiles = lambda script, kind: [
 A._save(A.ROTATE_STATE, {"tried": ["personal", "mindera"],
                          "last_refresh": time.time()})
 calls, A.subprocess.run = recorder([])
+check("it stays where it is for now", A.rotate_account("claude") is False)
+check("and runs no switch", switches(calls) == [], str(switches(calls)))
+
+print("\nand it goes back the moment that window reopens")
+a_successful_switch()
+A.ROTATE_PROFILES = ["personal", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("personal", "Personal", -60),              # its window just came back
+    account("mindera", "Mindera", 20 * 3600 + 34 * 60, active=True)]
+A._save(A.ROTATE_STATE, {"tried": ["personal", "mindera"],
+                         "last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
 check("it switched back", A.rotate_account("claude") is True)
 check("and to the sooner account", switches(calls) == ["personal"],
       str(switches(calls)))
+
+print("\nan account nobody could read is not guessed at while the live one is due")
+a_successful_switch()
+A.ROTATE_PROFILES = ["spare", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("spare", "Spare", 30 * 60, read_ago=4 * 3600),   # nothing current
+    account("mindera", "Mindera", 5 * 60, active=True)]      # back in five minutes
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+check("it waits for the account it is already on",
+      A.rotate_account("claude") is False)
+check("and runs no switch", switches(calls) == [], str(switches(calls)))
+
+print("\nbut that guess is worth one switch when the live account has hours to run")
+a_successful_switch()
+A.ROTATE_PROFILES = ["spare", "mindera"]
+A._switch_profiles = lambda script, kind: [
+    account("spare", "Spare", 30 * 60, read_ago=4 * 3600),
+    account("mindera", "Mindera", 6 * 3600, active=True)]
+A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+calls, A.subprocess.run = recorder([])
+check("it switches to find out", A.rotate_account("claude") is True)
+check("the unread account is tried", switches(calls) == ["spare"],
+      str(switches(calls)))
+check("and the guess is written down",
+      "spare" in (A._load(A.ROTATE_STATE, {}).get("guessed") or {}),
+      str(A._load(A.ROTATE_STATE, {})))
+
+print("\nand the same guess is not made twice in one dry spell")
+A._save(A.ROTATE_STATE, dict(A._load(A.ROTATE_STATE, {}), last_switch=0))
+calls, A.subprocess.run = recorder([])
+check("it is not tried again", A.rotate_account("claude") is False)
+check("and nothing switched", switches(calls) == [], str(switches(calls)))
 
 print("\nbut it stays put when it is already on the best one")
 a_successful_switch()
@@ -715,7 +764,16 @@ A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
 A.account_block = lambda kind=None: None
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it was prompted once", len(prompts) == 1, str(prompts))
-check("and the wall is gone", "w1:pA" not in A.load_walls())
+# The wall stays until the agent is seen to move. A prompt can fail, and a
+# window that only looked reopened leaves the agent stopped exactly where it
+# was: forgetting the wall on the way out is what stranded armed panes.
+check("the wall is held until the agent moves", "w1:pA" in A.load_walls(),
+      str(A.load_walls()))
+check("the attempt is counted", A.load_walls()["w1:pA"]["attempts"] == 1,
+      str(A.load_walls()["w1:pA"]))
+A.tick({"w1:pA": {"agent_status": "working", "agent": "codex"}}, set())
+check("and it is gone once the agent works again",
+      "w1:pA" not in A.load_walls(), str(A.load_walls()))
 
 print("\nbut only when it actually stopped")
 del prompts[:]
@@ -831,6 +889,113 @@ del prompts[:]
 A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it is nudged once", len(prompts) == 1, str(prompts))
+
+# ---- a wall outlives the evidence that raised it -------------------------
+#
+# The message on screen is how a wall is found, not what makes it real. It can
+# go for reasons that have nothing to do with the window reopening — a reading
+# that failed, a switch that emptied the cache, a prompt drawn over it — and
+# an armed pane that loses its wall then has nothing left to fire at the reset.
+
+print("\nan armed pane keeps its wall when the message goes while it is blocked")
+del prompts[:]
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+A.account_block = lambda kind=None: None
+A.tick({"w1:pA": {"agent_status": "blocked", "agent": "codex"}}, set())
+check("it is not typed into while it waits on you", prompts == [], str(prompts))
+check("but the wall is still remembered", "w1:pA" in A.load_walls(),
+      str(A.load_walls()))
+
+print("\nand the nudge lands once that same pane is idle again")
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("it is prompted on the later tick", len(prompts) == 1, str(prompts))
+
+print("\ndeferring a wall never pulls its resume time earlier")
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+was = A.load_walls()["w1:pA"]["resume_at"]
+A.defer_wall("w1:pA", time.time() + 60)
+check("an hour off stays an hour off",
+      A.load_walls()["w1:pA"]["resume_at"] == was,
+      str(A.load_walls()["w1:pA"]["resume_at"] - was))
+
+print("\na pane nobody armed still forgets its wall when the message goes")
+A._save(A.ARMED, [])
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("watching alone holds nothing", A.load_walls() == {}, str(A.load_walls()))
+
+# ---- an account nobody could read ----------------------------------------
+#
+# A switch drops the cached windows on purpose, and the reading that follows
+# can be rate limited. Nothing is then known about the account — which is not
+# the same answer as an account with room.
+
+print("\na wall stands while its account cannot be read")
+
+
+class _RateLimited(Exception):
+    code = 429
+
+
+REAL_FETCH = A._fetch_usage
+A.account_block = REAL_BLOCK
+A._fetch_usage = lambda provider: (_ for _ in ()).throw(_RateLimited())
+A._save(A.USAGE_CACHE, {})                  # a switch just emptied it
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("the wall is not cleared", "w1:pA" in A.load_walls(), str(A.load_walls()))
+check("and the pane is left alone until the reset", prompts == [], str(prompts))
+
+print("\nbut an account that answers with room does clear it")
+A._save(A.USAGE_CACHE, {"codex": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "5h", "percent": 4, "resets_at": time.time() + 3600}]}})
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("the pane is prompted", len(prompts) == 1, str(prompts))
+
+A._fetch_usage = REAL_FETCH
+A.account_block = lambda kind=None: None
+
+# ---- the panes a switch moves out from under -----------------------------
+#
+# A switch is machine-wide. An armed pane is prompted by the daemon, but a pane
+# nobody armed is left holding a wall whose account is gone, and its harness was
+# going to restart it against credentials that are no longer installed.
+
+print("\na switch marks the walls of the kind it moved")
+A._save(A.WALLS, {"w1:pA": walled_pane(3600),
+                  "w1:pB": dict(walled_pane(3600), kind="claude")})
+A.strand_walls("codex")
+walls = A.load_walls()
+check("the kind that moved is marked", walls["w1:pA"].get("stranded") is True,
+      str(walls["w1:pA"]))
+check("and the other kind is left alone",
+      "stranded" not in walls["w1:pB"], str(walls["w1:pB"]))
+
+print("\nan unarmed pane a switch stranded says so instead of counting down")
+badged.clear()
+REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
+A.herdr = record_badge
+A._save(A.ARMED, [])
+A.set_badge("w1:pA", A.load_walls()["w1:pA"], set())
+check("it shows the give-up glyph",
+      badged.get("token", "").endswith(A.GLYPH_GAVEUP),
+      str(badged.get("token")))
+
+print("\nbut an armed one still counts down, because we resume it ourselves")
+badged.clear()
+A.set_badge("w1:pA", A.load_walls()["w1:pA"], {"w1:pA"})
+check("the armed glyph and its countdown stand",
+      A.GLYPH_ARMED in badged.get("token", "")
+      and badged.get("token", "").endswith("1h00"),
+      str(badged.get("token")))
+A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK

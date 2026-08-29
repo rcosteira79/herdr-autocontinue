@@ -33,6 +33,12 @@ agent when it is over.
   back, and an agent that stopped mid-task is still stopped. An armed pane is
   prompted once as its wall goes away, so a wall that ends quietly does not
   leave the agent sitting idle.
+- **Hold the wall** — the message on screen is how a wall is found, not what
+  makes it real. It can go for reasons that have nothing to do with the window
+  reopening: a reading that failed, a switch that emptied the cache, a prompt
+  drawn over it. An armed pane's wall therefore stands until the agent is seen
+  working again, so the reset it already knows about still has something to
+  fire. Nothing here waits on the harness restarting itself.
 - **Follow the account** — a wall is stamped with the reopening it was told
   about when it was first seen, and that answer can turn out to be too late:
   rotation moves the pane onto another account, or the account revises its own
@@ -41,7 +47,8 @@ agent when it is over.
   backing off keeps the retry it earned.
 
 Badges: `🔄` armed, standing by · `🔄3h09` armed, will continue · `⏸3h09` seen
-but not armed · `⚠` gave up. An armed agent carries the glyph from the moment
+but not armed · `⚠` gave up, or a pane you did not arm that a switch moved the
+account out from under. An armed agent carries the glyph from the moment
 you arm it, so arming is visible without waiting for a wall; the countdown is
 what a wall adds. No badge means not armed and nothing seen.
 
@@ -223,11 +230,14 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
 | `AUTOCONTINUE_ROTATE_GAIN_S` | `300` | how much sooner another account must reopen to be worth a switch |
 | `AUTOCONTINUE_ROTATE_REFUSED_S` | `21600` | backstop before a refused profile is tried again |
+| `AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S` | `900` | how long the live account may have left before an unread one is worth a switch |
+| `AUTOCONTINUE_ROTATE_GUESS_GAP_S` | `3600` | how long a switch onto an unread account stands before that guess is made again |
 | `AUTOCONTINUE_NUDGE_GAP_S` | `120` | quiet period after a prompt before a nudge may follow |
+| `AUTOCONTINUE_BUSY_RETRY_S` | `60` | how long a wall waits over while the agent is busy or waiting on you |
 | `AUTOCONTINUE_ROTATE_REFRESH_GAP_S` | `300` | least time between fresh reads of the accounts |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
 | `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
-| `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed |
+| `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed, or when a switch stranded an unarmed pane |
 | `AUTOCONTINUE_DRY_RUN` | `0` | detect, badge and log, but never type |
 | `HERDR_BIN_PATH` | `herdr` | herdr binary (set by herdr when it invokes an action) |
 
@@ -241,7 +251,13 @@ environment, so setting one means exporting it before herdr starts.
   "usage limit reached" further up the scrollback is far more likely to be the
   agent *talking* about rate limits than hitting one. A wall also has to be
   seen on two consecutive polls before it is recorded.
-- Account usage: a second, wording-free signal. See below.
+- Wall lifetime: an armed pane's wall ends when the agent is seen working,
+  when a resume lands, or at `AUTOCONTINUE_MAX_ATTEMPTS` — never because the
+  message left the screen. An unarmed pane is watched only, so its wall goes
+  with the message.
+- Account usage: a second, wording-free signal. See below. An account nobody
+  could read is not an account with room: a failed reading holds the walls it
+  raised rather than clearing them.
 - Reset time, in order of preference: the message, then the account, then a
   blind retry every `AUTOCONTINUE_BLIND_RETRY_MIN`. From a message these are
   understood: `resets 12pm`, `resets 3:30pm`, `resets 15:00`,
@@ -343,21 +359,33 @@ otherwise start paying for a personal side-project without anyone deciding it.
 
 Rotation fires only when **a pane you armed** is walled and the account it bills
 to is spent. An unarmed pane never causes one, which keeps the rule that the
-plugin acts only where you opted in.
+plugin acts only where you opted in. A switch still lands on every pane on the
+machine, though, and the ones nobody armed are left holding a wall whose account
+has gone. Those get `⚠` rather than a countdown: this plugin will not type into
+them, and their own harness would be restarting them against credentials that
+are no longer installed.
 
 It ranks the accounts it may switch to. `account-switch` publishes what each
 saved account has left, parked ones included, so rotation takes an account with
 room first, then one nobody has read in the last half hour, then the accounts
 known to be spent, soonest to reopen first. An unread account goes ahead of a
-spent one on purpose: a parked account is usually parked because it was left
-alone, so its window has most likely reopened, and one switch is what finds out.
+spent one, but taking it is a guess, so the guess is only made where it can
+pay: while the live account still has more than
+`AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S` to run, and once per dry spell
+(`AUTOCONTINUE_ROTATE_GUESS_GAP_S`). An account about to come back on its own
+is worth more than an unknown one.
 
 Every named account is ranked, **including the one it is already on**. That
 matters most when the account it moved to turns out to be the worse of the two:
 your personal session may reopen in an hour while the account you switched to
-has a spent weekly and twenty hours to run. Rotation moves back. It only moves
-for an account that is better by `AUTOCONTINUE_ROTATE_GAIN_S`, which is what
-stops it flapping between two that reopen at much the same time.
+has a spent weekly and twenty hours to run. Rotation moves back — on the clock,
+not at once. Two spent accounts do the same amount of work, none, so a spent
+account that reopens sooner is switched to **when it reopens**, and the pane is
+prompted then. Switching hours early buys nothing: it puts every pane on the
+machine onto that account for the rest of its window, and it takes the restart
+away from a harness that may still do it itself. It also only moves for an
+account better by `AUTOCONTINUE_ROTATE_GAIN_S`, which is what stops it flapping
+between two that reopen at much the same time.
 
 Nothing reads those accounts on a timer, so by the time a wall appears the
 numbers are usually hours old, and ranking them would just re-pick the saved
