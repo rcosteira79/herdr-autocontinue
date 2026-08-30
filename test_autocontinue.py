@@ -1073,6 +1073,40 @@ print("\nbut what herdr names still wins")
 check("the exported directory is used", A._plugin_config_dir() == STATE,
       A._plugin_config_dir())
 
+print("\nand it does not wait out a window the account it left had")
+# The message is still on screen — codex does not redraw it until the agent
+# runs — but the account under the pane has changed and that one has room.
+A._save(A.USAGE_CACHE, {"codex": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), stranded=True)})
+A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
+A.account_block = REAL_BLOCK
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("it is prompted now, not in an hour", len(prompts) == 1, str(prompts))
+check("and the mark is spent, so the next sweep does not prompt again",
+      A.load_walls()["w1:pA"].get("stranded") is False,
+      str(A.load_walls().get("w1:pA")))
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("the next sweep leaves it alone", prompts == [], str(prompts))
+
+print("\nand a session that cannot use the new account is said so, once")
+# codex keeps the account it started on. Prompted after the switch it printed
+# the same limit straight back, naming the window of an account it had already
+# left. Nothing typed into that pane will help.
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), stranded=False,
+                                switched_try=time.time() - 600,
+                                last_attempt=time.time() - 600, attempts=1)})
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("it stops rather than spending its attempts",
+      A.load_walls()["w1:pA"]["status"] == "gaveup",
+      str(A.load_walls()["w1:pA"]))
+check("and it is not prompted again", prompts == [], str(prompts))
+
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK
 

@@ -932,6 +932,12 @@ def account_unknown(kind=None):
     return cached.get("windows") is None
 
 
+def account_has_room(kind):
+    """True when the account behind a kind was read, and has room to work."""
+    return (kind in ACCOUNT_KINDS and not account_unknown(kind)
+            and not account_block(kind))
+
+
 def account_reset_for(kind):
     """The soonest reset that kind's account knows about, for a blank time."""
     provider = KIND_PROVIDER.get(kind)
@@ -1532,6 +1538,39 @@ def tick(agents, pending):
                 f"{'' if pane_id in armed else ' (not armed, watching only)'}")
 
         wall = restamp_wall(pane_id, wall, kind)
+
+        # A message the agent has not redrawn yet is history once the account
+        # has changed under it. A codex pane kept its "try again at 9:29 PM" on
+        # screen after the switch, so the wall stood and the pane waited out a
+        # window nobody was waiting for — on an account with room all along.
+        # The mark is spent as it is used, or this would prompt every sweep.
+        if (pane_id in armed and wall["status"] == "waiting"
+                and wall.get("stranded") and account_has_room(kind)
+                and now < wall["resume_at"]):
+            log("%s: the account it moved to has room; not waiting out the "
+                "window the old one had" % pane_id)
+            _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
+                resume_at=now, stranded=False, switched_try=now))
+            wall = load_walls().get(pane_id, wall)
+
+        # And the answer that prompt gives. A session already running can be
+        # holding the account it started on: codex does, and it printed the same
+        # limit again the moment it was prompted, naming the old account's
+        # window while the one it had moved to had room. Nothing typed into that
+        # pane will help, so say what happened once rather than spending five
+        # attempts finding out.
+        tried_at = wall.get("last_attempt") or 0
+        if (wall.get("switched_try") and wall["status"] == "waiting"
+                and tried_at >= wall["switched_try"]
+                and (now - tried_at) >= NUDGE_GAP_S
+                and account_has_room(kind)):
+            log("%s: the wall is still up though the account it now bills to "
+                "has room. This session is not using that account — restart it."
+                % pane_id)
+            _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
+                status="gaveup"))
+            wall = load_walls().get(pane_id, wall)
+
         set_badge(pane_id, wall, armed)
 
         # Rotation: only for a pane you armed, and only while the account it

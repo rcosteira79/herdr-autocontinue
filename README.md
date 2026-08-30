@@ -378,6 +378,15 @@ Only profiles on that list are ever switched to. There is no "any profile"
 mode on purpose: a switch is machine-wide, so an unnamed work account could
 otherwise start paying for a personal side-project without anyone deciding it.
 
+A switch cannot reach a session that is already running. codex holds the
+account it started on: prompted after a switch it printed the same limit
+straight back, naming the window of an account it had already left, while the
+one it had moved to had room. So a wall that survives its first prompt after a
+switch, on a kind whose account reads as having room, stops there — one line in
+the log saying this session is not using that account, a `⚠` badge, and no
+further attempts. Restart that agent to pick the new account up. Claude Code
+reads its credentials per request and does carry on.
+
 A switch restarts the clock on every wall of that kind. The time a wall counts
 down to belongs to the account that raised it, and after a switch nothing is
 paying that bill: a codex pane sat counting down to the old account's 9:29 PM
