@@ -1397,12 +1397,20 @@ def _mark_restarted(pane_id, now):
 
 
 def _waited_for_shell(pane_id):
-    """True once herdr sees no agent in the pane, so a new one can start there."""
+    """True once herdr no longer sees a running agent in the pane.
+
+    `/exit` leaves the terminal open at its shell prompt, in the same pane, so
+    the only thing to wait for is codex itself going. herdr says that two ways:
+    it drops the pane from the agent list, or it keeps the pane and reports the
+    status as unknown. Waiting on the first alone timed out on the second.
+    """
     deadline = time.time() + RESTART_WAIT_S
     while time.time() < deadline:
         agents = live_agents()
-        if agents is not None and pane_id not in agents:
-            return True
+        if agents is not None:
+            info = agents.get(pane_id)
+            if info is None or info.get("agent_status") == "unknown":
+                return True
         time.sleep(1)
     return False
 
@@ -1431,7 +1439,7 @@ def restart_session(pane_id, info, kind):
             % (pane_id, RESTART_QUIT, (res.stderr or "").strip()[:120]))
         return False
     if not _waited_for_shell(pane_id):
-        log("%s: no shell prompt after %r, so it is left as it is"
+        log("%s: still running after %r, so it is left as it is"
             % (pane_id, RESTART_QUIT))
         return False
     res = herdr("agent", "start", label_of(info), "--kind", kind,

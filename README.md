@@ -404,11 +404,13 @@ It is **off by default and separate from arming** on purpose. Arming says the
 plugin may type `continue` into a pane; quitting an agent and starting it again
 is a bigger act than that, and widening what arming means is not something to
 do quietly. With it on, and only for a pane you armed, the plugin sends
-`/exit`, waits for the pane's shell prompt, runs `herdr agent start --pane` on
+`/exit`, waits for codex itself to be gone, runs `herdr agent start --pane` on
 that same pane with `resume <session id>`, and submits one `continue`.
 
-The pane does not move. `herdr agent start --pane` runs the agent in the pane
-it is given, so the pane id — and with it your arming — is exactly as it was.
+`/exit` leaves the terminal open at its shell prompt, in the same pane, so the
+wait is only for codex to go — herdr says that either by dropping the pane from
+the agent list or by reporting its status as unknown. The pane never moves, so
+the pane id, and with it your arming, is exactly as it was.
 Nothing is forced at any step: a session that will not quit is left where it
 is rather than killed, one that reports no session id is not touched, and a
 pane restarted once is left alone for `AUTOCONTINUE_RESTART_GAP_S`.

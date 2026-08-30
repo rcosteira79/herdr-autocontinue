@@ -1146,6 +1146,14 @@ check("it starts the same pane again, resuming that session",
 check("and the resumed session gets one continue",
       calls[2][:4] == ("agent", "prompt", "w1:pA", "continue"), str(calls[2]))
 
+print("\nherdr reporting the pane as unknown is codex being gone too")
+calls = restart_calls()
+A.live_agents = lambda: {"w1:pA": dict(CODEX_INFO, agent_status="unknown")}
+ok = A.restart_session("w1:pA", CODEX_INFO, "codex")
+check("it starts the session again", ok is True)
+check("without waiting the pane out",
+      [c[:2] for c in calls].count(("agent", "start")) == 1, str(calls))
+
 print("\na session that will not quit is left where it is")
 calls = restart_calls(quits=False)
 began = time.time()
