@@ -86,6 +86,19 @@ A.HERDR, A.HERDR_TIMEOUT_S = REAL_BIN, REAL_TIMEOUT
 check("it comes back at all", res.returncode != 0, str(res.returncode))
 check("and close to the timeout, not the command", took < 15, "%.1fs" % took)
 
+print("\na command that exits while something it started holds the output")
+# This is what actually froze the watcher. The shell exits at once; the sleep it
+# left behind keeps the command's own stdout open. A pipe is read to end of
+# file, so the read waited on the survivor. A file ends when the command does.
+A.HERDR, A.HERDR_TIMEOUT_S = "sh", 20.0
+began = time.time()
+res = A.herdr("-c", "echo done; sleep 30 & exit 0")
+took = time.time() - began
+A.HERDR, A.HERDR_TIMEOUT_S = REAL_BIN, REAL_TIMEOUT
+check("it does not wait for the survivor", took < 5, "%.1fs" % took)
+check("and the command's own output is there", res.stdout.strip() == "done",
+      repr(res.stdout))
+
 print("\nand a command that answers is unchanged")
 A.HERDR = "echo"
 res = A.herdr("hello")

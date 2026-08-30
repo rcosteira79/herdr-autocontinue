@@ -38,6 +38,7 @@ import platform
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -197,9 +198,8 @@ def _abandon(proc):
     """Kill a command's whole process group and stop reading from it.
 
     Killing the command alone is not enough. Something it started can inherit
-    the pipe, and the read then stays open on that grandchild long after the
-    command itself has gone. The group goes, and our end of the pipes is closed
-    whether or not it does.
+    the command's own descriptors and outlive it, so the group goes rather than
+    the one process. Any stream we opened is closed whether or not it does.
     """
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -218,28 +218,37 @@ def _abandon(proc):
 
 
 def herdr(*args):
-    """Run one herdr command, and never wait on it forever.
+    """Run one herdr command, and wait only on the command itself.
 
-    With no timeout a single call froze the whole watcher: the read never
-    returned, and the daemon sat in it for two hours — no badges, no walls, no
-    rotation, and nothing in the log to say so. A command that does not answer
-    is now abandoned and reported as a failure, which every caller already
-    handles as "could not read this one, look again next sweep". It runs in its
-    own session so the whole group can be cut loose, not just the process that
-    has already left.
+    Output goes to a temporary file rather than a pipe, because a pipe is read
+    until end of file and not until the child exits. Those are the same moment
+    only while nothing else holds the write end. `herdr` exited, something it
+    had started still held that end, and the read never returned: the daemon
+    sat in one call for two hours — no badges, no walls, no rotation, and
+    nothing in the log to say so. A file ends when the command does, so a
+    process that outlives it cannot hold the watcher.
+
+    The timeout is the remaining backstop, for a command that never exits at
+    all. It runs in its own session so the whole group can be cut loose then,
+    not just the process that has already left.
     """
-    proc = subprocess.Popen(
-        [HERDR, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, text=True, start_new_session=True,
-    )
-    try:
-        out, err = proc.communicate(timeout=HERDR_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        _abandon(proc)
-        log("herdr %s: no answer in %gs, gave up on it"
-            % (" ".join(str(a) for a in args[:2]), HERDR_TIMEOUT_S))
-        return subprocess.CompletedProcess(args, 1, "", "timed out")
-    return subprocess.CompletedProcess(args, proc.returncode, out, err)
+    with tempfile.TemporaryFile(mode="w+") as out, \
+            tempfile.TemporaryFile(mode="w+") as err:
+        proc = subprocess.Popen(
+            [HERDR, *args], stdout=out, stderr=err,
+            stdin=subprocess.DEVNULL, text=True, start_new_session=True,
+        )
+        try:
+            proc.wait(timeout=HERDR_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _abandon(proc)
+            log("herdr %s: no answer in %gs, gave up on it"
+                % (" ".join(str(a) for a in args[:2]), HERDR_TIMEOUT_S))
+            return subprocess.CompletedProcess(args, 1, "", "timed out")
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(
+            args, proc.returncode, out.read(), err.read())
 
 
 def log(message):

@@ -275,11 +275,14 @@ environment, so setting one means exporting it before herdr starts.
   "reset"), ISO timestamps, and unix epochs.
 - Resume: `herdr agent prompt <pane> "continue"`, which submits atomically with
   Enter. Retry delays are 5m, 15m, 45m, then hourly.
-- Every herdr command is abandoned after `AUTOCONTINUE_HERDR_TIMEOUT_S` and
-  reported as a failed read, which is what each caller already expects from a
-  pane it could not read. Without that one call froze the watcher: `herdr` had
-  exited, something it started still held the pipe, and the daemon sat in that
-  read for two hours with nothing in the log.
+- herdr commands write their output to a temporary file, not a pipe. A pipe is
+  read until end of file, which is the moment the command exits only while
+  nothing else holds the write end — `herdr` exited, something it had started
+  still held it, and the daemon sat in that one read for two hours with nothing
+  in the log. A file ends when the command does. `AUTOCONTINUE_HERDR_TIMEOUT_S`
+  is the remaining backstop, for a command that never exits at all: the process
+  group is killed and the call reports a failed read, which is what each caller
+  already expects from a pane it could not read.
 - Badges: `herdr pane report-metadata --token wall=…` with a TTL of four polls.
   The token is `wall`, not `limit`, because `senna-lang/herdr-agent-usage`
   already writes `$limit`; two plugins writing one token would overwrite each
