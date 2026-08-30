@@ -41,6 +41,16 @@ agent when it is over.
   it is owed waits with it. Forgetting the wall in either case is what left
   armed panes idle for hours with their window already open. Nothing here waits
   on the harness restarting itself.
+- **Switch accounts** — off until you name profiles. When an armed pane is
+  walled and the account it bills to is spent, it moves to a named account that
+  can work: one with room now, or one that reopens sooner, taken when it
+  reopens rather than hours early. A switch is machine-wide, so it is an
+  explicit list and an armed pane is the only thing that triggers one.
+- **Start a session again** — off unless you ask for it. A session already
+  running keeps the account it started on, and codex does: prompted after a
+  switch it prints the same limit straight back. With `restart_stranded` on,
+  such a pane is quit with `/exit` and started again in place on its own
+  session, then given one `continue`.
 - **Follow the account** — a wall is stamped with the reopening it was told
   about when it was first seen, and that answer can turn out to be too late:
   rotation moves the pane onto another account, or the account revises its own
@@ -107,6 +117,12 @@ herdr plugin install rcosteira79/herdr-autocontinue
 
 Or link a local checkout: `herdr plugin link /path/to/herdr-autocontinue`.
 Re-run `install`/`link` after a `herdr update` — updates drop plugins.
+
+A fresh install detects, badges, resumes and backs off, and does nothing else.
+Switching accounts and restarting a session are both off until you write them
+into the plugin's `config.toml` — see [Config](#config) for the file and
+[Rotating to another account](#rotating-to-another-account) for what to
+put in it.
 
 The watcher starts itself on the next herdr start; `herdr plugin action invoke
 start --plugin rcosteira.autocontinue` starts it now.
