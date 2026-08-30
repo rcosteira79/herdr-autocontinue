@@ -1796,6 +1796,7 @@ def cmd_daemon(argv):
     log(f"daemon up (sweep {POLL_S:g}s, prompt {PROMPT_TEXT!r}"
         f"{', woken by status events' if woken else ', sweep only'}"
         f", rotation {'-> ' + ','.join(ROTATE_PROFILES) if ROTATE_PROFILES else 'off'}"
+        f", restarts {'on for ' + ','.join(RESTART_KINDS) if RESTART_STRANDED else 'off'}"
         f"{', DRY RUN' if DRY_RUN else ''})")
     log("settings read from %s" % (
         os.path.join(CONFIG_DIR, "config.toml") if SETTINGS
