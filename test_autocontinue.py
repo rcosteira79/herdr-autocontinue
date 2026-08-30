@@ -1107,6 +1107,106 @@ check("it stops rather than spending its attempts",
       str(A.load_walls()["w1:pA"]))
 check("and it is not prompted again", prompts == [], str(prompts))
 
+# ---- restarting a session that cannot use the new account ----------------
+#
+# codex keeps the account it started on, so the only way it picks up a switch is
+# to be started again. The pane never moves: `herdr agent start --pane` runs the
+# agent in the pane it is given, which is what keeps the arming attached.
+
+CODEX_INFO = {"agent_status": "idle", "agent": "codex", "name": "mindera-people",
+              "agent_session": {"kind": "id", "value": "01a04a49-c4cb-7dd0"}}
+
+
+def restart_calls(quits=True):
+    """Record what a restart runs; answer the shell wait as `quits` says."""
+    calls = []
+
+    def fake(*args, **kwargs):
+        calls.append(args)
+        return _Ran(0)
+
+    A.herdr = fake
+    A.live_agents = lambda: ({} if quits else {"w1:pA": CODEX_INFO})
+    return calls
+
+
+REAL_AGENTS = A.live_agents
+A.RESTART_WAIT_S = 2.0
+
+print("\na restart quits the session, starts it again, and prompts it")
+calls = restart_calls()
+ok = A.restart_session("w1:pA", CODEX_INFO, "codex")
+check("it reports success", ok is True)
+check("it quits with the configured command",
+      calls[0][:4] == ("agent", "prompt", "w1:pA", "/exit"), str(calls[0]))
+check("it starts the same pane again, resuming that session",
+      calls[1][:2] == ("agent", "start") and "--pane" in calls[1]
+      and calls[1][calls[1].index("--pane") + 1] == "w1:pA"
+      and "01a04a49-c4cb-7dd0" in calls[1], str(calls[1]))
+check("and the resumed session gets one continue",
+      calls[2][:4] == ("agent", "prompt", "w1:pA", "continue"), str(calls[2]))
+
+print("\na session that will not quit is left where it is")
+calls = restart_calls(quits=False)
+began = time.time()
+ok = A.restart_session("w1:pA", CODEX_INFO, "codex")
+check("it reports failure", ok is False)
+check("nothing was started over it",
+      not [c for c in calls if c[:2] == ("agent", "start")], str(calls))
+check("and it gave up waiting rather than hanging",
+      time.time() - began < 10, "%.1fs" % (time.time() - began))
+
+print("\na pane with no session to resume is not touched")
+calls = restart_calls()
+ok = A.restart_session("w1:pA", {"agent": "codex", "name": "x"}, "codex")
+check("it reports failure", ok is False)
+check("and nothing was sent to it", calls == [], str(calls))
+
+print("\none restart stands for a while, so a pane is not cycled")
+A._save(A.RESTARTS, {"w1:pA": time.time()})
+check("a pane just restarted is not restarted again",
+      A.restarted_recently("w1:pA", time.time()) is True)
+A._save(A.RESTARTS, {"w1:pA": time.time() - A.RESTART_GAP_S - 1})
+check("and an old one no longer counts",
+      A.restarted_recently("w1:pA", time.time()) is False)
+
+print("\nand the restart is its own switch, not something arming turned on")
+tried = []
+REAL_RESTART = A.restart_session
+A.restart_session = lambda pane_id, info, kind: tried.append(pane_id) or True
+A._save(A.USAGE_CACHE, {"codex": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
+A.account_block = REAL_BLOCK
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.RESTARTS, {})
+A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
+
+
+def a_stranded_wall():
+    A._save(A.WALLS, {"w1:pA": dict(
+        walled_pane(3600), stranded=False, attempts=1,
+        switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+
+
+A.RESTART_STRANDED = False
+a_stranded_wall()
+A.tick({"w1:pA": CODEX_INFO}, set())
+check("off, it only says what happened", tried == [], str(tried))
+check("and the wall gives up", A.load_walls()["w1:pA"]["status"] == "gaveup",
+      str(A.load_walls()["w1:pA"]["status"]))
+
+A.RESTART_STRANDED = True
+a_stranded_wall()
+A.tick({"w1:pA": CODEX_INFO}, set())
+check("on, the session is restarted", tried == ["w1:pA"], str(tried))
+check("and the wall goes with it", "w1:pA" not in A.load_walls(),
+      str(A.load_walls()))
+
+A.restart_session = REAL_RESTART
+A.RESTART_STRANDED = False
+A.live_agents = REAL_AGENTS
+
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK
 

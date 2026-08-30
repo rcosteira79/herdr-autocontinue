@@ -240,6 +240,11 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
 | `AUTOCONTINUE_ROTATE_GAIN_S` | `300` | how much sooner another account must reopen to be worth a switch |
 | `AUTOCONTINUE_ROTATE_REFUSED_S` | `21600` | backstop before a refused profile is tried again |
+| `AUTOCONTINUE_RESTART_STRANDED` | `0` | start a session again when it cannot use the account it moved to |
+| `AUTOCONTINUE_RESTART_KINDS` | `codex` | kinds that may be restarted that way |
+| `AUTOCONTINUE_RESTART_QUIT` | `/exit` | what is submitted to quit the agent |
+| `AUTOCONTINUE_RESTART_WAIT_S` | `30` | how long to wait for the pane's shell prompt |
+| `AUTOCONTINUE_RESTART_GAP_S` | `3600` | how long one restart stands before another is allowed |
 | `AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S` | `900` | how long the live account may have left before an unread one is worth a switch |
 | `AUTOCONTINUE_ROTATE_GUESS_GAP_S` | `3600` | how long a switch onto an unread account stands before that guess is made again |
 | `AUTOCONTINUE_NUDGE_GAP_S` | `120` | quiet period after a prompt before a nudge may follow |
@@ -381,11 +386,32 @@ otherwise start paying for a personal side-project without anyone deciding it.
 A switch cannot reach a session that is already running. codex holds the
 account it started on: prompted after a switch it printed the same limit
 straight back, naming the window of an account it had already left, while the
-one it had moved to had room. So a wall that survives its first prompt after a
-switch, on a kind whose account reads as having room, stops there — one line in
-the log saying this session is not using that account, a `⚠` badge, and no
-further attempts. Restart that agent to pick the new account up. Claude Code
-reads its credentials per request and does carry on.
+one it had moved to had room. Claude Code reads its credentials per request and
+does carry on, which is why this only shows on codex.
+
+So a wall that survives its first prompt after a switch, on a kind whose
+account reads as having room, stops there: a line in the log saying this
+session is not using that account, a `⚠` badge, and no further attempts.
+
+`restart_stranded` offers the other answer — start that session again, which is
+what picks the new account up:
+
+```toml
+restart_stranded = true
+```
+
+It is **off by default and separate from arming** on purpose. Arming says the
+plugin may type `continue` into a pane; quitting an agent and starting it again
+is a bigger act than that, and widening what arming means is not something to
+do quietly. With it on, and only for a pane you armed, the plugin sends
+`/exit`, waits for the pane's shell prompt, runs `herdr agent start --pane` on
+that same pane with `resume <session id>`, and submits one `continue`.
+
+The pane does not move. `herdr agent start --pane` runs the agent in the pane
+it is given, so the pane id — and with it your arming — is exactly as it was.
+Nothing is forced at any step: a session that will not quit is left where it
+is rather than killed, one that reports no session id is not touched, and a
+pane restarted once is left alone for `AUTOCONTINUE_RESTART_GAP_S`.
 
 A switch restarts the clock on every wall of that kind. The time a wall counts
 down to belongs to the account that raised it, and after a switch nothing is

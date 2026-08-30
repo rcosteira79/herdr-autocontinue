@@ -1063,6 +1063,17 @@ BUSY_RETRY_S = _num("AUTOCONTINUE_BUSY_RETRY_S", 60.0)
 # A fresh reading is taken at most this often, however many sweeps want one.
 ROTATE_REFRESH_GAP_S = _num("AUTOCONTINUE_ROTATE_REFRESH_GAP_S", 300.0)
 ROTATE_STATE = os.path.join(STATE_DIR, "rotate.json")
+# Restarting a session is a bigger act than typing into one, so it is its own
+# switch rather than something arming quietly started to mean.
+RESTART_STRANDED = _flag("AUTOCONTINUE_RESTART_STRANDED", default=False)
+RESTART_KINDS = _list("AUTOCONTINUE_RESTART_KINDS", "codex")
+# What quits the agent. codex takes /exit.
+RESTART_QUIT = _setting("AUTOCONTINUE_RESTART_QUIT") or "/exit"
+# How long to wait for the pane to come back to its shell prompt.
+RESTART_WAIT_S = _num("AUTOCONTINUE_RESTART_WAIT_S", 30.0)
+# And how long one restart stands, so a pane is not cycled.
+RESTART_GAP_S = _num("AUTOCONTINUE_RESTART_GAP_S", 3600.0)
+RESTARTS = os.path.join(STATE_DIR, "restarts.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
 )
@@ -1375,6 +1386,66 @@ def defer_wall(pane_id, until):
         resume_at=max(w.get(pane_id, {}).get("resume_at") or 0, until)))
 
 
+def restarted_recently(pane_id, now):
+    return (now - (_load(RESTARTS, {}).get(pane_id) or 0)) < RESTART_GAP_S
+
+
+def _mark_restarted(pane_id, now):
+    marks = _load(RESTARTS, {})
+    marks[pane_id] = now
+    _save(RESTARTS, marks)
+
+
+def _waited_for_shell(pane_id):
+    """True once herdr sees no agent in the pane, so a new one can start there."""
+    deadline = time.time() + RESTART_WAIT_S
+    while time.time() < deadline:
+        agents = live_agents()
+        if agents is not None and pane_id not in agents:
+            return True
+        time.sleep(1)
+    return False
+
+
+def restart_session(pane_id, info, kind):
+    """Quit the agent in a pane and start it again on its own session.
+
+    A session already running keeps the account it started on, so a switch
+    cannot reach it: codex prints the same limit straight back. Starting it
+    again is what picks the new account up, and the pane does not move —
+    `herdr agent start --pane` runs the agent in the pane it is given, so the
+    pane id, and with it your arming, are exactly as they were.
+
+    Every step has to hold and none of them is forced. A session that will not
+    quit is left where it is rather than killed.
+    """
+    session = info.get("agent_session") or {}
+    if session.get("kind") != "id" or not session.get("value"):
+        log("%s: no session id to resume, so not restarting it" % pane_id)
+        return False
+    log("%s: restarting it on its own session to pick the new account up"
+        % pane_id)
+    res = herdr("agent", "prompt", pane_id, RESTART_QUIT)
+    if res.returncode != 0:
+        log("%s: could not send %r: %s"
+            % (pane_id, RESTART_QUIT, (res.stderr or "").strip()[:120]))
+        return False
+    if not _waited_for_shell(pane_id):
+        log("%s: no shell prompt after %r, so it is left as it is"
+            % (pane_id, RESTART_QUIT))
+        return False
+    res = herdr("agent", "start", label_of(info), "--kind", kind,
+                "--pane", pane_id, "--", "resume", session["value"])
+    if res.returncode != 0:
+        log("%s: could not start it again: %s"
+            % (pane_id, (res.stderr or "").strip()[:160]))
+        return False
+    log("%s: back up on session %s" % (pane_id, str(session["value"])[:8]))
+    herdr("agent", "prompt", pane_id, PROMPT_TEXT)
+    log("%s: submitted %r to the resumed session" % (pane_id, PROMPT_TEXT))
+    return True
+
+
 def attempt_resume(pane_id, wall, info):
     """Type into an armed pane whose window should have reopened.
 
@@ -1564,6 +1635,14 @@ def tick(agents, pending):
                 and tried_at >= wall["switched_try"]
                 and (now - tried_at) >= NUDGE_GAP_S
                 and account_has_room(kind)):
+            if (RESTART_STRANDED and kind in RESTART_KINDS
+                    and not restarted_recently(pane_id, now)
+                    and restart_session(pane_id, info, kind)):
+                _mark_restarted(pane_id, now)
+                drop_wall(pane_id, "restarted on the account it moved to")
+                pending.discard(pane_id)
+                refresh_badge(pane_id, None, armed)
+                continue
             log("%s: the wall is still up though the account it now bills to "
                 "has room. This session is not using that account — restart it."
                 % pane_id)
