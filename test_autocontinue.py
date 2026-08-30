@@ -997,6 +997,30 @@ check("the armed glyph and its countdown stand",
       str(badged.get("token")))
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 
+# ---- finding the settings from outside herdr -----------------------------
+#
+# herdr exports the config directory to an action it runs. A daemon started from
+# a shell inherits none of that, and the state dir it fell back to holds no
+# config.toml — so the watcher came up on defaults with an empty profile list,
+# which is exactly how rotation is switched off on purpose. It ran that way for
+# fourteen hours without a word.
+
+print("\nthe config directory is herdr's own when nothing names one")
+saved = os.environ.pop("HERDR_PLUGIN_CONFIG_DIR")
+try:
+    got = A._plugin_config_dir()
+finally:
+    os.environ["HERDR_PLUGIN_CONFIG_DIR"] = saved
+want = os.path.join(os.environ.get("XDG_CONFIG_HOME") or
+                    os.path.expanduser("~/.config"),
+                    "herdr", "plugins", "config", A.PLUGIN_ID)
+check("it falls back to the plugin's own config dir", got == want, got)
+check("and the state dir is not it", got != A.STATE_DIR, got)
+
+print("\nbut what herdr names still wins")
+check("the exported directory is used", A._plugin_config_dir() == STATE,
+      A._plugin_config_dir())
+
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK
 

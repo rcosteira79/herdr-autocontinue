@@ -52,7 +52,24 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.environ.get("HERDR_PLUGIN_STATE_DIR") or os.path.expanduser(
     os.path.join("~/.local/state/herdr/plugins", PLUGIN_ID)
 )
-CONFIG_DIR = os.environ.get("HERDR_PLUGIN_CONFIG_DIR") or STATE_DIR
+def _plugin_config_dir():
+    """Where this plugin's settings live, whoever started the process.
+
+    herdr exports the directory to an action it runs itself. A daemon started
+    from a shell — `autocontinue restart` after an edit, say — inherits none of
+    that, and falling back to the state dir found no config.toml at all: the
+    watcher then ran on defaults with rotation silently switched off, because
+    an empty profile list is also how rotation is turned off on purpose. Fall
+    back to herdr's own directory instead, the way STATE_DIR does.
+    """
+    named = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
+    if named:
+        return named
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "herdr", "plugins", "config", PLUGIN_ID)
+
+
+CONFIG_DIR = _plugin_config_dir()
 WALLS = os.path.join(STATE_DIR, "walls.json")
 ARMED = os.path.join(STATE_DIR, "armed.json")
 PIDFILE = os.path.join(STATE_DIR, "daemon.pid")
@@ -1567,9 +1584,16 @@ def cmd_daemon(argv):
             f.write(str(os.getpid()))
 
     woken = _install_wake_handler()
+    # Say whether rotation is on. It is off whenever the profile list is empty,
+    # which is both how it is turned off and how a daemon that cannot find its
+    # config.toml comes up — and that second one used to be invisible.
     log(f"daemon up (sweep {POLL_S:g}s, prompt {PROMPT_TEXT!r}"
         f"{', woken by status events' if woken else ', sweep only'}"
+        f", rotation {'-> ' + ','.join(ROTATE_PROFILES) if ROTATE_PROFILES else 'off'}"
         f"{', DRY RUN' if DRY_RUN else ''})")
+    log("settings read from %s" % (
+        os.path.join(CONFIG_DIR, "config.toml") if SETTINGS
+        else "nowhere: no config file under %s" % CONFIG_DIR))
     pending = set()
     server_fails = 0
     last_tick = 0.0

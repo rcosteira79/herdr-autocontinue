@@ -193,8 +193,15 @@ codex_kinds = ["codex"]
 
 The key is the variable below without its `AUTOCONTINUE_` prefix, lowercased.
 `config.json` works too. A file that fails to parse is ignored rather than
-fatal, and the defaults stand. The daemon reads it at startup, so restart the
-watcher after a change:
+fatal, and the defaults stand.
+
+The daemon finds this file whether herdr started it or you did from a shell,
+and its first log line says what it found: `rotation -> personal,mindera` when
+the profiles arrived, `rotation off` when they did not. An empty profile list
+is also how rotation is switched off deliberately, so the line is the only way
+to tell the two apart.
+
+The daemon reads the file at startup, so restart the watcher after a change:
 
 ```sh
 herdr plugin action invoke stop --plugin rcosteira.autocontinue
