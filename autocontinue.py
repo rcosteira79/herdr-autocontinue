@@ -1085,6 +1085,10 @@ RESTART_GAP_S = _num("AUTOCONTINUE_RESTART_GAP_S", 3600.0)
 # room, before the session is taken to be using a different account. The gap is
 # for the account's own reading to catch up with a pane that has just stopped.
 STRANDED_AFTER_S = _num("AUTOCONTINUE_STRANDED_AFTER_S", 120.0)
+# And how long after that prompt before its answer is taken as read. The answer
+# is the wall still standing, which the next sweep already shows, so this is one
+# sweep and not the quiet period a nudge keeps.
+STRANDED_CONFIRM_S = _num("AUTOCONTINUE_STRANDED_CONFIRM_S", 60.0)
 RESTARTS = os.path.join(STATE_DIR, "restarts.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -1653,7 +1657,7 @@ def tick(agents, pending):
         # And the answer that prompt gives. Nothing typed into that pane will
         # help, so act on it once rather than spending five attempts finding out.
         elif (stranded and tried_at >= wall["detected_at"]
-                and (now - tried_at) >= NUDGE_GAP_S
+                and (now - tried_at) >= STRANDED_CONFIRM_S
                 and wall["status"] in ("waiting", "gaveup")):
             # A wall that has already given up still qualifies. Giving up here
             # means "nothing typed into this pane will help", which is the exact

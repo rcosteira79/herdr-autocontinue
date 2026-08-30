@@ -1092,6 +1092,25 @@ del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("the next sweep leaves it alone", prompts == [], str(prompts))
 
+print("\nthe prompt's answer is taken from the next sweep, not two minutes on")
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
+                                detected_at=time.time() - 300,
+                                last_attempt=time.time() - 61)})
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("one sweep after the prompt is enough to conclude",
+      A.load_walls()["w1:pA"]["status"] == "gaveup",
+      str(A.load_walls()["w1:pA"]["status"]))
+
+print("\nbut not in the same sweep as the prompt")
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
+                                detected_at=time.time() - 300,
+                                last_attempt=time.time() - 5)})
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("a prompt just sent is still given its chance",
+      A.load_walls()["w1:pA"]["status"] == "waiting",
+      str(A.load_walls()["w1:pA"]["status"]))
+
 print("\nand a session that cannot use its account is said so, once")
 # Prompted, codex printed the same limit straight back, naming the window of an
 # account it had already left. Nothing typed into that pane will help.
