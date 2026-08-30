@@ -153,6 +153,8 @@ POLL_S = _num("AUTOCONTINUE_POLL_S", 60.0)
 # Never tick more often than this, however many events arrive at once. Nineteen
 # panes changing status together is one tick, not nineteen.
 MIN_TICK_S = _num("AUTOCONTINUE_MIN_TICK_S", 2.0)
+# How long any one herdr command may take before it is abandoned.
+HERDR_TIMEOUT_S = _num("AUTOCONTINUE_HERDR_TIMEOUT_S", 30.0)
 TAIL_LINES = _num("AUTOCONTINUE_TAIL_LINES", 15, int)
 READ_LINES = _num("AUTOCONTINUE_READ_LINES", 60, int)
 PROMPT_TEXT = _setting("AUTOCONTINUE_PROMPT") or "continue"
@@ -191,10 +193,53 @@ MONTHS = {m: i for i, m in enumerate(
 
 # ---- plumbing -------------------------------------------------------------
 
+def _abandon(proc):
+    """Kill a command's whole process group and stop reading from it.
+
+    Killing the command alone is not enough. Something it started can inherit
+    the pipe, and the read then stays open on that grandchild long after the
+    command itself has gone. The group goes, and our end of the pipes is closed
+    whether or not it does.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        pass
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=1)
+    except Exception:
+        pass
+
+
 def herdr(*args):
-    return subprocess.run(
-        [HERDR, *args], capture_output=True, text=True, check=False
+    """Run one herdr command, and never wait on it forever.
+
+    With no timeout a single call froze the whole watcher: the read never
+    returned, and the daemon sat in it for two hours — no badges, no walls, no
+    rotation, and nothing in the log to say so. A command that does not answer
+    is now abandoned and reported as a failure, which every caller already
+    handles as "could not read this one, look again next sweep". It runs in its
+    own session so the whole group can be cut loose, not just the process that
+    has already left.
+    """
+    proc = subprocess.Popen(
+        [HERDR, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, text=True, start_new_session=True,
     )
+    try:
+        out, err = proc.communicate(timeout=HERDR_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _abandon(proc)
+        log("herdr %s: no answer in %gs, gave up on it"
+            % (" ".join(str(a) for a in args[:2]), HERDR_TIMEOUT_S))
+        return subprocess.CompletedProcess(args, 1, "", "timed out")
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 def log(message):

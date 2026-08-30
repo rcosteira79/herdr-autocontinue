@@ -217,6 +217,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_PROMPT` | `continue` | what gets submitted when the window reopens |
 | `AUTOCONTINUE_POLL_S` | `60` | safety-sweep interval (s); the status hook covers the responsive path |
 | `AUTOCONTINUE_MIN_TICK_S` | `2` | shortest gap between ticks, so an event burst is one tick |
+| `AUTOCONTINUE_HERDR_TIMEOUT_S` | `30` | how long one herdr command may take before it is abandoned |
 | `AUTOCONTINUE_GRACE_S` | `60` | extra wait after the parsed reset time |
 | `AUTOCONTINUE_RESTAMP_MIN_GAIN_S` | `60` | how much sooner an account must reopen before a wall follows it |
 | `AUTOCONTINUE_MAX_ATTEMPTS` | `5` | attempts before giving up on a wall |
@@ -269,10 +270,16 @@ environment, so setting one means exporting it before herdr starts.
   blind retry every `AUTOCONTINUE_BLIND_RETRY_MIN`. From a message these are
   understood: `resets 12pm`, `resets 3:30pm`, `resets 15:00`,
   `resets Feb 3 at 9am`, `will reset at 3pm (Europe/Lisbon)` (named zones
-  resolve through `zoneinfo`), `try again in 4 days 2 hours 46 minutes`, ISO
-  timestamps, and unix epochs.
+  resolve through `zoneinfo`), `try again in 4 days 2 hours 46 minutes`,
+  `try again at 9:29 PM` (codex says it that way, never using the word
+  "reset"), ISO timestamps, and unix epochs.
 - Resume: `herdr agent prompt <pane> "continue"`, which submits atomically with
   Enter. Retry delays are 5m, 15m, 45m, then hourly.
+- Every herdr command is abandoned after `AUTOCONTINUE_HERDR_TIMEOUT_S` and
+  reported as a failed read, which is what each caller already expects from a
+  pane it could not read. Without that one call froze the watcher: `herdr` had
+  exited, something it started still held the pipe, and the daemon sat in that
+  read for two hours with nothing in the log.
 - Badges: `herdr pane report-metadata --token wall=…` with a TTL of four polls.
   The token is `wall`, not `limit`, because `senna-lang/herdr-agent-usage`
   already writes `$limit`; two plugins writing one token would overwrite each

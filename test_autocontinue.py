@@ -70,6 +70,29 @@ def at(now):
     CLOCK.pinned = now.replace(tzinfo=LISBON).timestamp()
 
 
+# ---- a herdr command that never answers ----------------------------------
+#
+# One call with no timeout froze the whole watcher. herdr had exited; something
+# it started held the pipe, and the read never returned. The daemon sat in that
+# one call for two hours: no badges, no walls, no rotation, nothing logged.
+
+print("\na herdr command that never answers is abandoned")
+REAL_BIN, REAL_TIMEOUT = A.HERDR, A.HERDR_TIMEOUT_S
+A.HERDR, A.HERDR_TIMEOUT_S = "sleep", 1.0
+began = time.time()
+res = A.herdr("60")
+took = time.time() - began
+A.HERDR, A.HERDR_TIMEOUT_S = REAL_BIN, REAL_TIMEOUT
+check("it comes back at all", res.returncode != 0, str(res.returncode))
+check("and close to the timeout, not the command", took < 15, "%.1fs" % took)
+
+print("\nand a command that answers is unchanged")
+A.HERDR = "echo"
+res = A.herdr("hello")
+A.HERDR = REAL_BIN
+check("the output is returned", res.stdout.strip() == "hello", repr(res.stdout))
+check("with its exit code", res.returncode == 0, str(res.returncode))
+
 # ---- reset-time parsing across a daylight-saving change ------------------
 #
 # Lisbon is UTC+1 in August and UTC+0 in February. A reset time read in August
@@ -104,6 +127,19 @@ at(dt.datetime(2026, 8, 24, 15, 0))
 got, _ = A.parse_reset("resets at 9am")
 check("it is tomorrow, not this morning",
       got == dt.datetime(2026, 8, 25, 9, 0, tzinfo=LISBON).timestamp(), str(got))
+
+print("\na codex wall names its time without ever saying 'reset'")
+at(dt.datetime(2026, 8, 30, 18, 5))
+codex_line = ("\u25a0 You've hit your usage limit. Upgrade to Pro "
+              "(https://chatgpt.com/explore/pro), visit "
+              "https://chatgpt.com/codex/settings/usage to purchase more "
+              "credits or try again at 9:29 PM.")
+seen = A.find_wall(codex_line, "codex")
+check("the wall itself is seen", seen and seen[0] == "codex-hit", str(seen))
+got, which = A.parse_reset(codex_line)
+want = dt.datetime(2026, 8, 30, 21, 29, tzinfo=LISBON).timestamp()
+check("and 'try again at 9:29 PM' is the reset", got == want,
+      "%s via %s" % (got, which))
 
 print("\nthe checks do not lean on today's real date")
 # parse_reset drops anything already in the past. It reads that "now" from
