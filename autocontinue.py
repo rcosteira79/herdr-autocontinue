@@ -1639,24 +1639,31 @@ def tick(agents, pending):
         # pane will help, so say what happened once rather than spending five
         # attempts finding out.
         tried_at = wall.get("last_attempt") or 0
-        if (wall.get("switched_try") and wall["status"] == "waiting"
-                and tried_at >= wall["switched_try"]
+        if (wall.get("switched_try") and tried_at >= wall["switched_try"]
                 and (now - tried_at) >= NUDGE_GAP_S
+                and wall["status"] in ("waiting", "gaveup")
                 and account_has_room(kind)):
+            # A wall that has already given up still qualifies. Giving up here
+            # means "nothing typed into this pane will help", which is the exact
+            # case restarting the session answers — so switching the setting on
+            # has to reach the pane that taught you to want it.
             if (RESTART_STRANDED and kind in RESTART_KINDS
-                    and not restarted_recently(pane_id, now)
-                    and restart_session(pane_id, info, kind)):
+                    and not restarted_recently(pane_id, now)):
+                # Marked before the attempt, not after: a restart that fails
+                # halfway must not be tried again on the next sweep.
                 _mark_restarted(pane_id, now)
-                drop_wall(pane_id, "restarted on the account it moved to")
-                pending.discard(pane_id)
-                refresh_badge(pane_id, None, armed)
-                continue
-            log("%s: the wall is still up though the account it now bills to "
-                "has room. This session is not using that account — restart it."
-                % pane_id)
-            _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
-                status="gaveup"))
-            wall = load_walls().get(pane_id, wall)
+                if restart_session(pane_id, info, kind):
+                    drop_wall(pane_id, "restarted on the account it moved to")
+                    pending.discard(pane_id)
+                    refresh_badge(pane_id, None, armed)
+                    continue
+            if wall["status"] == "waiting":
+                log("%s: the wall is still up though the account it now bills "
+                    "to has room. This session is not using that account — "
+                    "restart it." % pane_id)
+                _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
+                    status="gaveup"))
+                wall = load_walls().get(pane_id, wall)
 
         set_badge(pane_id, wall, armed)
 

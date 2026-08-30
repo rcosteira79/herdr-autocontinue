@@ -1211,6 +1211,26 @@ check("on, the session is restarted", tried == ["w1:pA"], str(tried))
 check("and the wall goes with it", "w1:pA" not in A.load_walls(),
       str(A.load_walls()))
 
+print("\nswitching it on reaches the pane that had already given up")
+del tried[:]
+A._save(A.RESTARTS, {})
+A._save(A.WALLS, {"w1:pA": dict(
+    walled_pane(3600), stranded=False, attempts=5, status="gaveup",
+    switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+A.tick({"w1:pA": CODEX_INFO}, set())
+check("a wall that gave up is restarted too", tried == ["w1:pA"], str(tried))
+
+print("\na restart that fails is not tried again on the next sweep")
+A.restart_session = lambda pane_id, info, kind: False
+A._save(A.RESTARTS, {})
+A._save(A.WALLS, {"w1:pA": dict(
+    walled_pane(3600), stranded=False, attempts=5, status="gaveup",
+    switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+A.tick({"w1:pA": CODEX_INFO}, set())
+check("the attempt is written down even though it failed",
+      A.restarted_recently("w1:pA", time.time()) is True,
+      str(A._load(A.RESTARTS, {})))
+
 A.restart_session = REAL_RESTART
 A.RESTART_STRANDED = False
 A.live_agents = REAL_AGENTS

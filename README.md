@@ -413,7 +413,13 @@ the agent list or by reporting its status as unknown. The pane never moves, so
 the pane id, and with it your arming, is exactly as it was.
 Nothing is forced at any step: a session that will not quit is left where it
 is rather than killed, one that reports no session id is not touched, and a
-pane restarted once is left alone for `AUTOCONTINUE_RESTART_GAP_S`.
+pane restarted once is left alone for `AUTOCONTINUE_RESTART_GAP_S` — the
+attempt counts whether or not it worked, so a restart that fails halfway is not
+run again on the next sweep.
+
+Switching it on reaches a pane that has already given up, too. Giving up there
+means "nothing typed into this pane will help", which is the case restarting
+answers, so you do not have to clear the wall by hand first.
 
 A switch restarts the clock on every wall of that kind. The time a wall counts
 down to belongs to the account that raised it, and after a switch nothing is
