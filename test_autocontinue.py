@@ -1073,33 +1073,31 @@ print("\nbut what herdr names still wins")
 check("the exported directory is used", A._plugin_config_dir() == STATE,
       A._plugin_config_dir())
 
-print("\nand it does not wait out a window the account it left had")
-# The message is still on screen — codex does not redraw it until the agent
-# runs — but the account under the pane has changed and that one has room.
+print("\na pane walled while its own account has room is not left waiting")
+# Those cannot both be about the same account. The session is using credentials
+# this account does not have — codex keeps the account it started on — so there
+# is no window here to wait out.
 A._save(A.USAGE_CACHE, {"codex": {
     "fetched_at": time.time(), "tried_at": time.time(),
     "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
 A._save(A.ARMED, ["w1:pA"])
-A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), stranded=True)})
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600),
+                                detected_at=time.time() - 600)})
 A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
 A.account_block = REAL_BLOCK
 del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it is prompted now, not in an hour", len(prompts) == 1, str(prompts))
-check("and the mark is spent, so the next sweep does not prompt again",
-      A.load_walls()["w1:pA"].get("stranded") is False,
-      str(A.load_walls().get("w1:pA")))
 del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("the next sweep leaves it alone", prompts == [], str(prompts))
 
-print("\nand a session that cannot use the new account is said so, once")
-# codex keeps the account it started on. Prompted after the switch it printed
-# the same limit straight back, naming the window of an account it had already
-# left. Nothing typed into that pane will help.
-A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), stranded=False,
-                                switched_try=time.time() - 600,
-                                last_attempt=time.time() - 600, attempts=1)})
+print("\nand a session that cannot use its account is said so, once")
+# Prompted, codex printed the same limit straight back, naming the window of an
+# account it had already left. Nothing typed into that pane will help.
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
+                                detected_at=time.time() - 600,
+                                last_attempt=time.time() - 600)})
 del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it stops rather than spending its attempts",
@@ -1191,10 +1189,10 @@ A._save(A.RESTARTS, {})
 A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
 
 
-def a_stranded_wall():
+def a_stranded_wall(status="waiting"):
     A._save(A.WALLS, {"w1:pA": dict(
-        walled_pane(3600), stranded=False, attempts=1,
-        switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+        walled_pane(3600), attempts=1, status=status,
+        detected_at=time.time() - 600, last_attempt=time.time() - 600)})
 
 
 A.RESTART_STRANDED = False
@@ -1214,18 +1212,14 @@ check("and the wall goes with it", "w1:pA" not in A.load_walls(),
 print("\nswitching it on reaches the pane that had already given up")
 del tried[:]
 A._save(A.RESTARTS, {})
-A._save(A.WALLS, {"w1:pA": dict(
-    walled_pane(3600), stranded=False, attempts=5, status="gaveup",
-    switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+a_stranded_wall(status="gaveup")
 A.tick({"w1:pA": CODEX_INFO}, set())
 check("a wall that gave up is restarted too", tried == ["w1:pA"], str(tried))
 
 print("\na restart that fails is not tried again on the next sweep")
 A.restart_session = lambda pane_id, info, kind: False
 A._save(A.RESTARTS, {})
-A._save(A.WALLS, {"w1:pA": dict(
-    walled_pane(3600), stranded=False, attempts=5, status="gaveup",
-    switched_try=time.time() - 600, last_attempt=time.time() - 600)})
+a_stranded_wall(status="gaveup")
 A.tick({"w1:pA": CODEX_INFO}, set())
 check("the attempt is written down even though it failed",
       A.restarted_recently("w1:pA", time.time()) is True,

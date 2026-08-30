@@ -939,11 +939,19 @@ def account_has_room(kind):
 
 
 def account_reset_for(kind):
-    """The soonest reset that kind's account knows about, for a blank time."""
+    """The soonest reset a *spent* window of that account has, for a blank time.
+
+    Only a spent window is a reason to wait. Every window has a reset time, and
+    taking the soonest of all of them parked a codex pane until 02:36 — the
+    hour its 5h window happened to roll over, while that window sat at 22% and
+    nothing was blocked at all. With nothing spent there is no time to wait
+    for, and the caller falls back to looking again shortly.
+    """
     provider = KIND_PROVIDER.get(kind)
     if not provider:
         return None
-    times = [w["resets_at"] for w in usage_windows(provider) if w.get("resets_at")]
+    times = [w["resets_at"] for w in usage_windows(provider)
+             if _spent(w) and w.get("resets_at")]
     return min(times) if times else None
 
 
@@ -1073,6 +1081,10 @@ RESTART_QUIT = _setting("AUTOCONTINUE_RESTART_QUIT") or "/exit"
 RESTART_WAIT_S = _num("AUTOCONTINUE_RESTART_WAIT_S", 30.0)
 # And how long one restart stands, so a pane is not cycled.
 RESTART_GAP_S = _num("AUTOCONTINUE_RESTART_GAP_S", 3600.0)
+# How long a wall must stand, while the account it bills to reads as having
+# room, before the session is taken to be using a different account. The gap is
+# for the account's own reading to catch up with a pane that has just stopped.
+STRANDED_AFTER_S = _num("AUTOCONTINUE_STRANDED_AFTER_S", 120.0)
 RESTARTS = os.path.join(STATE_DIR, "restarts.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -1618,31 +1630,31 @@ def tick(agents, pending):
 
         wall = restamp_wall(pane_id, wall, kind)
 
-        # A message the agent has not redrawn yet is history once the account
-        # has changed under it. A codex pane kept its "try again at 9:29 PM" on
-        # screen after the switch, so the wall stood and the pane waited out a
-        # window nobody was waiting for — on an account with room all along.
-        # The mark is spent as it is used, or this would prompt every sweep.
-        if (pane_id in armed and wall["status"] == "waiting"
-                and wall.get("stranded") and account_has_room(kind)
-                and now < wall["resume_at"]):
-            log("%s: the account it moved to has room; not waiting out the "
-                "window the old one had" % pane_id)
-            _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
-                resume_at=now, stranded=False, switched_try=now))
+        # A pane that says it is walled while the account it bills to has room.
+        # Those cannot both be about the same account, so the session is using
+        # credentials this account does not have: codex keeps the account it
+        # started on, and a switch never reaches it. Anchored on the account
+        # rather than on a mark left by the switch, because the wall carrying
+        # that mark is dropped the moment the agent redraws its screen — the
+        # limit came back eight minutes later as a brand new wall that
+        # remembered nothing, and the restart never fired.
+        tried_at = wall.get("last_attempt") or 0
+        stranded = (pane_id in armed and account_has_room(kind)
+                    and (now - wall["detected_at"]) >= STRANDED_AFTER_S)
+
+        if stranded and tried_at < wall["detected_at"] and now < wall["resume_at"]:
+            # Not prompted on this wall yet. There is no window to wait out —
+            # the account this pane bills to has room right now.
+            log("%s: the account it bills to has room; not waiting out a "
+                "window nobody is waiting for" % pane_id)
+            _update_walls(lambda w, p=pane_id: w.get(p, {}).update(resume_at=now))
             wall = load_walls().get(pane_id, wall)
 
-        # And the answer that prompt gives. A session already running can be
-        # holding the account it started on: codex does, and it printed the same
-        # limit again the moment it was prompted, naming the old account's
-        # window while the one it had moved to had room. Nothing typed into that
-        # pane will help, so say what happened once rather than spending five
-        # attempts finding out.
-        tried_at = wall.get("last_attempt") or 0
-        if (wall.get("switched_try") and tried_at >= wall["switched_try"]
+        # And the answer that prompt gives. Nothing typed into that pane will
+        # help, so act on it once rather than spending five attempts finding out.
+        elif (stranded and tried_at >= wall["detected_at"]
                 and (now - tried_at) >= NUDGE_GAP_S
-                and wall["status"] in ("waiting", "gaveup")
-                and account_has_room(kind)):
+                and wall["status"] in ("waiting", "gaveup")):
             # A wall that has already given up still qualifies. Giving up here
             # means "nothing typed into this pane will help", which is the exact
             # case restarting the session answers — so switching the setting on

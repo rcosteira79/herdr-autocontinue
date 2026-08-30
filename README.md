@@ -245,6 +245,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_RESTART_QUIT` | `/exit` | what is submitted to quit the agent |
 | `AUTOCONTINUE_RESTART_WAIT_S` | `30` | how long to wait for the pane's shell prompt |
 | `AUTOCONTINUE_RESTART_GAP_S` | `3600` | how long one restart stands before another is allowed |
+| `AUTOCONTINUE_STRANDED_AFTER_S` | `120` | how long a wall stands, while its account has room, before the session is taken to be on another account |
 | `AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S` | `900` | how long the live account may have left before an unread one is worth a switch |
 | `AUTOCONTINUE_ROTATE_GUESS_GAP_S` | `3600` | how long a switch onto an unread account stands before that guess is made again |
 | `AUTOCONTINUE_NUDGE_GAP_S` | `120` | quiet period after a prompt before a nudge may follow |
@@ -389,9 +390,16 @@ straight back, naming the window of an account it had already left, while the
 one it had moved to had room. Claude Code reads its credentials per request and
 does carry on, which is why this only shows on codex.
 
-So a wall that survives its first prompt after a switch, on a kind whose
-account reads as having room, stops there: a line in the log saying this
-session is not using that account, a `⚠` badge, and no further attempts.
+The tell is the account itself, not the switch. A pane that says it is walled
+while the account it bills to reads as having room cannot be talking about that
+account, so the session is using credentials the account does not have. A wall
+that has stood for `AUTOCONTINUE_STRANDED_AFTER_S` in that state is prompted
+once — there is no window to wait out — and if it survives that prompt it stops
+there: a line in the log saying this session is not using that account, a `⚠`
+badge, and no further attempts. Anchoring it on the account matters, because a
+mark left by the switch dies with the wall: codex redrew its screen, the wall
+was dropped, and the same limit came back eight minutes later as a new wall
+that remembered nothing.
 
 `restart_stranded` offers the other answer — start that session again, which is
 what picks the new account up:
