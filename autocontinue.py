@@ -608,18 +608,32 @@ def _update_walls(mutate):
 
 
 def strand_walls(kind):
-    """Mark every wall of a kind as one the account moved out from under.
+    """A switch resets every wall of that kind: new account, new clock.
 
-    A switch is machine-wide, and it lands on panes nobody armed as well. Those
-    are watched and never typed into, so the plugin will not restart them, and
-    the harness that was going to do it itself now holds another account's
-    credentials. The badge says so instead of counting down to a resume that is
-    not coming.
+    The time a wall counts down to belongs to the account that raised it, and
+    after a switch nothing is paying that bill any more. A codex pane sat
+    counting down to the old account's 9:29 PM while the account it had just
+    moved to had room all along. The attempts go the same way: the ones already
+    spent were spent against a different account.
+
+    The wall itself stays, because the message is still on screen until the
+    agent redraws it. What changes is that the pane is tried again shortly
+    rather than hours from now, and that a pane nobody armed says so: it is
+    never typed into here, and the harness that would have restarted it is now
+    holding another account's credentials.
     """
+    now = time.time()
+
     def mutate(walls):
         for entry in walls.values():
-            if entry.get("kind") == kind:
-                entry["stranded"] = True
+            if entry.get("kind") != kind:
+                continue
+            entry["stranded"] = True
+            entry["reset_at"] = None
+            entry["resume_at"] = now + BUSY_RETRY_S
+            entry["attempts"] = 0
+            entry["last_attempt"] = None
+            entry["status"] = "waiting"
 
     _update_walls(mutate)
 
@@ -1330,19 +1344,23 @@ def rotate_account(kind):
     return True
 
 
-def keep_wall(pane_id, wall, armed):
+def keep_wall(pane_id, wall, armed, info):
     """True when a wall whose evidence went away is kept anyway.
 
-    An armed pane's wall is the only record that the agent stopped behind one
-    and has not been continued since. The evidence can go for reasons that have
-    nothing to do with the window reopening — an account reading that failed, a
-    switch that emptied the cache, a prompt drawn over the message — and
-    forgetting the wall then left the agent parked with its reset time already
-    known and recorded. Only the agent moving again ends a wall, and `tick`
-    handles that before this is reached. An unarmed pane is watched and never
-    typed into, so nothing is held for it.
+    A wall ends when its evidence is genuinely gone — the message left the
+    screen, or the account that raised it now reads as having room. A reading
+    that could not be taken is not that answer, and `tick` holds those walls
+    before this is reached.
+
+    What is held here is a nudge we owe and cannot deliver. An agent that is
+    working is already moving. One blocked on a prompt of its own is stopped
+    exactly where the wall left it, and it is never typed into — forgetting the
+    wall there is what let a reset arrive with nothing left to fire, and an
+    armed pane sat idle for hours with its window open.
     """
-    return pane_id in armed and wall.get("status") == "waiting"
+    if pane_id not in armed or wall.get("status") != "waiting":
+        return False
+    return info.get("agent_status") == "blocked"
 
 
 def defer_wall(pane_id, until):
@@ -1470,26 +1488,27 @@ def tick(agents, pending):
             hit = (wall["rule"], wall["matched"], "")
 
         if hit is None:
-            if wall and keep_wall(pane_id, wall, armed):
+            if wall and keep_wall(pane_id, wall, armed, info):
+                # Waiting on you, so it is never typed into. The nudge it is owed
+                # waits with it, rather than the wall being forgotten and the
+                # pane left sitting idle with its window already open.
+                defer_wall(pane_id, now + BUSY_RETRY_S)
+                set_badge(pane_id, load_walls().get(pane_id, wall), armed)
+                pending.discard(pane_id)
+                continue
+            if wall:
                 # The harness clears its own message when the window reopens,
                 # and an agent that stopped mid-task is still stopped. Prompt an
                 # armed one on the way out: dropping the wall quietly is what
                 # left armed panes sitting idle for hours after their window
                 # came back.
-                if info.get("agent_status") == "blocked":
-                    # Waiting on you, so it is never typed into. The wall it
-                    # stopped at is still ours to remember: forgetting it here
-                    # is what let a reset arrive with nothing left to fire.
-                    defer_wall(pane_id, now + BUSY_RETRY_S)
-                elif (now - (wall.get("last_attempt") or 0)) >= NUDGE_GAP_S:
+                just_prompted = (
+                    now - (wall.get("last_attempt") or 0)) < NUDGE_GAP_S
+                if (pane_id in armed and wall.get("status") == "waiting"
+                        and not just_prompted
+                        and info.get("agent_status") != "working"):
                     log("%s: the wall went away on its own; nudging it" % pane_id)
                     attempt_resume(pane_id, wall, info)
-                wall = load_walls().get(pane_id)
-                if wall:
-                    set_badge(pane_id, wall, armed)
-                    pending.discard(pane_id)
-                    continue
-            if wall:
                 drop_wall(pane_id, "message gone")
             pending.discard(pane_id)
             refresh_badge(pane_id, None, armed)

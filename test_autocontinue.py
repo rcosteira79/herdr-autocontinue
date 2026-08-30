@@ -813,16 +813,8 @@ A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
 A.account_block = lambda kind=None: None
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it was prompted once", len(prompts) == 1, str(prompts))
-# The wall stays until the agent is seen to move. A prompt can fail, and a
-# window that only looked reopened leaves the agent stopped exactly where it
-# was: forgetting the wall on the way out is what stranded armed panes.
-check("the wall is held until the agent moves", "w1:pA" in A.load_walls(),
+check("and the wall is gone", "w1:pA" not in A.load_walls(),
       str(A.load_walls()))
-check("the attempt is counted", A.load_walls()["w1:pA"]["attempts"] == 1,
-      str(A.load_walls()["w1:pA"]))
-A.tick({"w1:pA": {"agent_status": "working", "agent": "codex"}}, set())
-check("and it is gone once the agent works again",
-      "w1:pA" not in A.load_walls(), str(A.load_walls()))
 
 print("\nbut only when it actually stopped")
 del prompts[:]
@@ -1017,15 +1009,26 @@ A.account_block = lambda kind=None: None
 # nobody armed is left holding a wall whose account is gone, and its harness was
 # going to restart it against credentials that are no longer installed.
 
-print("\na switch marks the walls of the kind it moved")
-A._save(A.WALLS, {"w1:pA": walled_pane(3600),
+print("\na switch restarts the clock on the walls of the kind it moved")
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=5, status="gaveup"),
                   "w1:pB": dict(walled_pane(3600), kind="claude")})
 A.strand_walls("codex")
 walls = A.load_walls()
-check("the kind that moved is marked", walls["w1:pA"].get("stranded") is True,
-      str(walls["w1:pA"]))
-check("and the other kind is left alone",
-      "stranded" not in walls["w1:pB"], str(walls["w1:pB"]))
+moved = walls["w1:pA"]
+check("the kind that moved is marked", moved.get("stranded") is True,
+      str(moved))
+check("the old account's reset is dropped", moved["reset_at"] is None,
+      str(moved["reset_at"]))
+check("it is tried again shortly, not hours from now",
+      moved["resume_at"] - A.time.time() <= A.BUSY_RETRY_S + 1,
+      str(moved["resume_at"] - A.time.time()))
+check("the attempts spent on the old account are forgiven",
+      moved["attempts"] == 0, str(moved["attempts"]))
+check("and one that had given up is back in play",
+      moved["status"] == "waiting", moved["status"])
+check("the other kind is left alone",
+      "stranded" not in walls["w1:pB"] and walls["w1:pB"]["attempts"] == 0,
+      str(walls["w1:pB"]))
 
 print("\nan unarmed pane a switch stranded says so instead of counting down")
 badged.clear()
@@ -1040,9 +1043,9 @@ check("it shows the give-up glyph",
 print("\nbut an armed one still counts down, because we resume it ourselves")
 badged.clear()
 A.set_badge("w1:pA", A.load_walls()["w1:pA"], {"w1:pA"})
-check("the armed glyph and its countdown stand",
+check("the armed glyph and a countdown stand",
       A.GLYPH_ARMED in badged.get("token", "")
-      and badged.get("token", "").endswith("1h00"),
+      and not badged.get("token", "").endswith(A.GLYPH_GAVEUP),
       str(badged.get("token")))
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 

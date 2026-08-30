@@ -33,12 +33,14 @@ agent when it is over.
   back, and an agent that stopped mid-task is still stopped. An armed pane is
   prompted once as its wall goes away, so a wall that ends quietly does not
   leave the agent sitting idle.
-- **Hold the wall** — the message on screen is how a wall is found, not what
-  makes it real. It can go for reasons that have nothing to do with the window
-  reopening: a reading that failed, a switch that emptied the cache, a prompt
-  drawn over it. An armed pane's wall therefore stands until the agent is seen
-  working again, so the reset it already knows about still has something to
-  fire. Nothing here waits on the harness restarting itself.
+- **Hold the wall** — a wall ends when its evidence is genuinely gone: the
+  message left the screen, or the account that raised it now reads as having
+  room. A reading nobody could take is not that answer, so a wall it raised
+  stands until someone can ask again. One more thing keeps a wall: an armed
+  pane that is blocked on a prompt of its own is never typed into, so the nudge
+  it is owed waits with it. Forgetting the wall in either case is what left
+  armed panes idle for hours with their window already open. Nothing here waits
+  on the harness restarting itself.
 - **Follow the account** — a wall is stamped with the reopening it was told
   about when it was first seen, and that answer can turn out to be too late:
   rotation moves the pane onto another account, or the account revises its own
@@ -259,10 +261,12 @@ environment, so setting one means exporting it before herdr starts.
   "usage limit reached" further up the scrollback is far more likely to be the
   agent *talking* about rate limits than hitting one. A wall also has to be
   seen on two consecutive polls before it is recorded.
-- Wall lifetime: an armed pane's wall ends when the agent is seen working,
-  when a resume lands, or at `AUTOCONTINUE_MAX_ATTEMPTS` — never because the
-  message left the screen. An unarmed pane is watched only, so its wall goes
-  with the message.
+- Wall lifetime: a wall ends when the agent is seen working, when its evidence
+  goes (the message left the screen, or the account reads as having room), or
+  at `AUTOCONTINUE_MAX_ATTEMPTS`. An armed pane gets its nudge on the way out.
+  Two things hold a wall past that: an account nobody could read, and an armed
+  pane blocked on a prompt of its own, which is owed a nudge it cannot be given
+  yet.
 - Account usage: a second, wording-free signal. See below. An account nobody
   could read is not an account with room: a failed reading holds the walls it
   raised rather than clearing them.
@@ -373,6 +377,14 @@ rotate_profiles = ["personal-max", "team-overflow"]
 Only profiles on that list are ever switched to. There is no "any profile"
 mode on purpose: a switch is machine-wide, so an unnamed work account could
 otherwise start paying for a personal side-project without anyone deciding it.
+
+A switch restarts the clock on every wall of that kind. The time a wall counts
+down to belongs to the account that raised it, and after a switch nothing is
+paying that bill: a codex pane sat counting down to the old account's 9:29 PM
+while the account it had just moved to had room all along. The attempts already
+spent go the same way, since they were spent against a different account. The
+wall itself stays, because the message is still on screen until the agent
+redraws it.
 
 Rotation fires only when **a pane you armed** is walled and the account it bills
 to is spent. An unarmed pane never causes one, which keeps the rule that the
