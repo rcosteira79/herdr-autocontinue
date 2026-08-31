@@ -1073,10 +1073,30 @@ print("\nbut what herdr names still wins")
 check("the exported directory is used", A._plugin_config_dir() == STATE,
       A._plugin_config_dir())
 
-print("\na pane walled while its own account has room is not left waiting")
+print("\na pane and its account disagreeing is not enough on its own")
+# An account's reading lags a pane that has only just stopped, and a claude pane
+# written off that way was never resumed at its real reset two hours later. The
+# stranded case exists because a switch happened, so a switch has to have.
+A._save(A.ROTATE_STATE, {})
+A._save(A.USAGE_CACHE, {"codex": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
+A._save(A.ARMED, ["w1:pA"])
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600),
+                                detected_at=time.time() - 600)})
+A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
+A.account_block = REAL_BLOCK
+del prompts[:]
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
+check("with no switch behind it, the wall is left to its own clock",
+      prompts == [] and A.load_walls()["w1:pA"]["status"] == "waiting",
+      str(prompts) + str(A.load_walls()["w1:pA"]["status"]))
+
+print("\nbut a pane walled right after a switch is not left waiting")
 # Those cannot both be about the same account. The session is using credentials
 # this account does not have — codex keeps the account it started on — so there
 # is no window here to wait out.
+A._save(A.ROTATE_STATE, {"switched": {"codex": time.time() - 60}})
 A._save(A.USAGE_CACHE, {"codex": {
     "fetched_at": time.time(), "tried_at": time.time(),
     "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
@@ -1206,6 +1226,9 @@ A.account_block = REAL_BLOCK
 A._save(A.ARMED, ["w1:pA"])
 A._save(A.RESTARTS, {})
 A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
+
+
+A._save(A.ROTATE_STATE, {"switched": {"codex": time.time() - 60}})
 
 
 def a_stranded_wall(status="waiting"):

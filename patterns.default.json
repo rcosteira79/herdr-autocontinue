@@ -51,7 +51,7 @@
     { "id": "relative",
       "regex": "(?i)\\b(?:try again|retry|resets?|available again|come back)\\s+in\\s+(?:(?P<days>\\d+)\\s*(?:d\\b|days?)\\s*)?(?:(?P<hours>\\d+)\\s*(?:h\\b|hours?|hrs?)\\s*)?(?:(?P<minutes>\\d+)\\s*(?:m\\b|mins?|minutes?))?" },
     { "id": "try-again-clock",
-      "regex": "(?i)\\b(?:try again|available again|come back)\\s+at\\s+(?P<hour>\\d{1,2})(?::(?P<minute>\\d{2}))?\\s*(?P<ampm>[ap]\\.?m\\.?)?(?:\\s*\\((?P<tz>[^)]{1,40})\\))?" },
+      "regex": "(?i)\\b(?:try again|available again|come back|continuing(?: automatically)?)\\s+at\\s+(?P<hour>\\d{1,2})(?::(?P<minute>\\d{2}))?\\s*(?P<ampm>[ap]\\.?m\\.?)?(?:\\s*\\((?P<tz>[^)]{1,40})\\))?" },
     { "id": "clock-12h",
       "regex": "(?i)\\breset(?:s|ting)?\\b(?!\\s+every\\b)[^0-9]{0,16}?(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(?P<day>\\d{1,2})(?:st|nd|rd|th)?[, ]+(?:at\\s+)?)?(?P<hour>\\d{1,2})(?::(?P<minute>\\d{2}))?\\s*(?P<ampm>[ap]\\.?m\\.?)(?:\\s*\\((?P<tz>[^)]{1,40})\\))?" },
     { "id": "clock-24h",

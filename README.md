@@ -263,6 +263,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_RESTART_GAP_S` | `3600` | how long one restart stands before another is allowed |
 | `AUTOCONTINUE_STRANDED_AFTER_S` | `120` | how long a wall stands, while its account has room, before the session is taken to be on another account |
 | `AUTOCONTINUE_STRANDED_CONFIRM_S` | `60` | how long after that prompt before the wall still standing is its answer |
+| `AUTOCONTINUE_SWITCH_MEMORY_S` | `1800` | how long after a switch a pane still walled counts as left on the old account |
 | `AUTOCONTINUE_ROTATE_UNKNOWN_HORIZON_S` | `900` | how long the live account may have left before an unread one is worth a switch |
 | `AUTOCONTINUE_ROTATE_GUESS_GAP_S` | `3600` | how long a switch onto an unread account stands before that guess is made again |
 | `AUTOCONTINUE_NUDGE_GAP_S` | `120` | quiet period after a prompt before a nudge may follow |
@@ -298,8 +299,9 @@ environment, so setting one means exporting it before herdr starts.
   understood: `resets 12pm`, `resets 3:30pm`, `resets 15:00`,
   `resets Feb 3 at 9am`, `will reset at 3pm (Europe/Lisbon)` (named zones
   resolve through `zoneinfo`), `try again in 4 days 2 hours 46 minutes`,
-  `try again at 9:29 PM` (codex says it that way, never using the word
-  "reset"), ISO timestamps, and unix epochs.
+  `try again at 9:29 PM` and `continuing automatically at 3:10am` (codex and
+  Claude Code say it those ways, never using the word "reset"), ISO timestamps,
+  and unix epochs.
 - Resume: `herdr agent prompt <pane> "continue"`, which submits atomically with
   Enter. Retry delays are 5m, 15m, 45m, then hourly.
 - herdr commands write their output to a temporary file, not a pipe. A pipe is
@@ -407,9 +409,13 @@ straight back, naming the window of an account it had already left, while the
 one it had moved to had room. Claude Code reads its credentials per request and
 does carry on, which is why this only shows on codex.
 
-The tell is the account itself, not the switch. A pane that says it is walled
-while the account it bills to reads as having room cannot be talking about that
-account, so the session is using credentials the account does not have. A wall
+The tell is a pane that says it is walled while the account it bills to reads
+as having room: those cannot both be about the same account, so the session is
+using credentials the account does not have. That only counts within
+`AUTOCONTINUE_SWITCH_MEMORY_S` of a switch this plugin made. Outside that
+window the same disagreement is ordinary lag — an account's own reading trails
+a pane that has just stopped, and a claude pane written off that way was never
+resumed at its real reset two hours later. A wall
 that has stood for `AUTOCONTINUE_STRANDED_AFTER_S` in that state is prompted
 once — there is no window to wait out — and if it is still standing one sweep
 later (`AUTOCONTINUE_STRANDED_CONFIRM_S`) that is the prompt's answer, and it

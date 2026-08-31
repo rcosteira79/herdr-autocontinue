@@ -1089,6 +1089,10 @@ STRANDED_AFTER_S = _num("AUTOCONTINUE_STRANDED_AFTER_S", 120.0)
 # is the wall still standing, which the next sweep already shows, so this is one
 # sweep and not the quiet period a nudge keeps.
 STRANDED_CONFIRM_S = _num("AUTOCONTINUE_STRANDED_CONFIRM_S", 60.0)
+# How long after a switch a pane still walled is read as a session left on the
+# old account. Outside that, a pane and its account disagreeing is just the
+# account's own reading lagging a pane that has only stopped this minute.
+SWITCH_MEMORY_S = _num("AUTOCONTINUE_SWITCH_MEMORY_S", 1800.0)
 RESTARTS = os.path.join(STATE_DIR, "restarts.json")
 SWITCH_PLUGIN_ID = os.environ.get(
     "AUTOCONTINUE_SWITCH_PLUGIN", "rcosteira.account-switch"
@@ -1369,8 +1373,11 @@ def rotate_account(kind):
     guessed = dict(state.get("guessed") or {})
     if _rotate_rank(best, now)[0] == 1:
         guessed[target] = now
+    switched = dict(state.get("switched") or {})
+    switched[kind] = now
     _save(ROTATE_STATE, {"last_switch": now, "last_refresh": last_refresh,
-                         "refused": kept, "guessed": guessed})
+                         "refused": kept, "guessed": guessed,
+                         "switched": switched})
     log("rotate: %s -> %s (%s)" % (kind, target, (res.stdout or "").strip()[:120]))
     herdr("notification", "show", "Auto-continue switched account",
           "--body", (res.stdout or target).strip()[:200], "--sound", "none")
@@ -1400,6 +1407,20 @@ def defer_wall(pane_id, until):
     """Hold a wall over, without ever pulling its resume time earlier."""
     _update_walls(lambda w: w.get(pane_id, {}).update(
         resume_at=max(w.get(pane_id, {}).get("resume_at") or 0, until)))
+
+
+def switched_recently(kind, now):
+    """True when this kind's account was changed a short while ago.
+
+    The stranded case only exists because a switch happened: the file changed
+    and the running session did not follow. Without this, an account reading
+    that merely lags a pane looks identical — a claude pane hit its limit at
+    01:01, the account still read under the threshold at 01:03, and the pane
+    was written off as stranded and never resumed at its real reset two hours
+    later. It had never been switched at all.
+    """
+    switched = (_load(ROTATE_STATE, {}).get("switched") or {}).get(kind) or 0
+    return (now - switched) < SWITCH_MEMORY_S
 
 
 def restarted_recently(pane_id, now):
@@ -1644,6 +1665,7 @@ def tick(agents, pending):
         # remembered nothing, and the restart never fired.
         tried_at = wall.get("last_attempt") or 0
         stranded = (pane_id in armed and account_has_room(kind)
+                    and switched_recently(kind, now)
                     and (now - wall["detected_at"]) >= STRANDED_AFTER_S)
 
         if stranded and tried_at < wall["detected_at"] and now < wall["resume_at"]:
