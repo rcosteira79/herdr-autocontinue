@@ -418,12 +418,18 @@ a pane that has just stopped, and a claude pane written off that way was never
 resumed at its real reset two hours later. A wall
 that has stood for `AUTOCONTINUE_STRANDED_AFTER_S` in that state is prompted
 once — there is no window to wait out — and if it is still standing one sweep
-later (`AUTOCONTINUE_STRANDED_CONFIRM_S`) that is the prompt's answer, and it
-stops there: a line in the log saying this session is not using that account, a `⚠`
-badge, and no further attempts. Anchoring it on the account matters, because a
-mark left by the switch dies with the wall: codex redrew its screen, the wall
-was dropped, and the same limit came back eight minutes later as a new wall
-that remembered nothing.
+later (`AUTOCONTINUE_STRANDED_CONFIRM_S`) that is the prompt's answer: one line
+in the log saying this session is not using that account, said once per wall.
+
+Saying it is all it does. Writing the pane off as well took away the one thing
+still working — the resume at the wall's own reset. A claude pane written off
+at 08:10 carried on by itself a minute later, at its real reopening. Prompting
+stays bounded by the attempts the wall already carries, and where restarting is
+switched on for that kind, the restart is what follows.
+
+Reading it off the wall alone does not work either: a mark left by the switch
+dies with the wall. codex redrew its screen, the wall was dropped, and the same
+limit came back eight minutes later as a new wall that remembered nothing.
 
 `restart_stranded` offers the other answer — start that session again, which is
 what picks the new account up:
