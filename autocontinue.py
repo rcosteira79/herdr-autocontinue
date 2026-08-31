@@ -1702,12 +1702,18 @@ def tick(agents, pending):
                     pending.discard(pane_id)
                     refresh_badge(pane_id, None, armed)
                     continue
-            if wall["status"] == "waiting":
+            if wall["status"] == "waiting" and not wall.get("stranded_noted"):
                 log("%s: the wall is still up though the account it now bills "
-                    "to has room. This session is not using that account — "
-                    "restart it." % pane_id)
+                    "to has room; this session is not using that account%s"
+                    % (pane_id, "" if RESTART_STRANDED and kind in RESTART_KINDS
+                       else " — restart it."))
+                # Saying it is all this does. Writing the pane off as well
+                # removed the one thing that still worked, the resume at the
+                # wall's own reset: a claude pane was given up on at 08:10 and
+                # carried on by itself a minute later, at its real reopening.
+                # Prompting stays bounded by the attempts the wall already has.
                 _update_walls(lambda w, p=pane_id: w.get(p, {}).update(
-                    status="gaveup"))
+                    stranded_noted=True))
                 wall = load_walls().get(pane_id, wall)
 
         set_badge(pane_id, wall, armed)

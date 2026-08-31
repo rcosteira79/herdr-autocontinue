@@ -1127,8 +1127,8 @@ A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
 del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("one sweep after the prompt is enough to conclude",
-      A.load_walls()["w1:pA"]["status"] == "gaveup",
-      str(A.load_walls()["w1:pA"]["status"]))
+      A.load_walls()["w1:pA"].get("stranded_noted") is True,
+      str(A.load_walls()["w1:pA"]))
 
 print("\nbut not in the same sweep as the prompt")
 A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
@@ -1136,21 +1136,48 @@ A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
                                 last_attempt=time.time() - 5)})
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("a prompt just sent is still given its chance",
-      A.load_walls()["w1:pA"]["status"] == "waiting",
-      str(A.load_walls()["w1:pA"]["status"]))
+      A.load_walls()["w1:pA"].get("stranded_noted") is None,
+      str(A.load_walls()["w1:pA"]))
+
+print("\na kind that cannot be restarted keeps its wall and its clock")
+# Giving up is only right where restarting replaces it. On a kind this cannot
+# restart, giving up removes the one thing left that works — the resume at the
+# wall's own reset. A claude pane written off that way carried on by itself a
+# minute later, at its real reopening.
+A._save(A.ROTATE_STATE, {"switched": {"claude": time.time() - 60}})
+A._save(A.USAGE_CACHE, {"claude": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "session", "percent": 4,
+                 "resets_at": time.time() + 3600}]}})
+A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), kind="claude", attempts=1,
+                                detected_at=time.time() - 600,
+                                last_attempt=time.time() - 300)})
+A.pane_text = lambda pane_id, lines=None: "Claude usage limit reached"
+A.tick({"w1:pA": {"agent_status": "idle", "agent": "claude"}}, set())
+kept = A.load_walls()["w1:pA"]
+check("it is not written off", kept["status"] == "waiting", kept["status"])
+check("and it is only said once", kept.get("stranded_noted") is True,
+      str(kept.get("stranded_noted")))
 
 print("\nand a session that cannot use its account is said so, once")
 # Prompted, codex printed the same limit straight back, naming the window of an
-# account it had already left. Nothing typed into that pane will help.
+# account it had already left. Saying so does not write the pane off: its own
+# reset is still the thing that will free it.
+A._save(A.ROTATE_STATE, {"switched": {"codex": time.time() - 60}})
+A._save(A.USAGE_CACHE, {"codex": {
+    "fetched_at": time.time(), "tried_at": time.time(),
+    "windows": [{"kind": "5h", "percent": 3, "resets_at": time.time() + 3600}]}})
 A._save(A.WALLS, {"w1:pA": dict(walled_pane(3600), attempts=1,
                                 detected_at=time.time() - 600,
                                 last_attempt=time.time() - 600)})
+A.pane_text = lambda pane_id, lines=None: "You've hit your usage limit"
 del prompts[:]
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
-check("it stops rather than spending its attempts",
-      A.load_walls()["w1:pA"]["status"] == "gaveup",
-      str(A.load_walls()["w1:pA"]))
-check("and it is not prompted again", prompts == [], str(prompts))
+noted = A.load_walls()["w1:pA"]
+check("it keeps its wall and its clock", noted["status"] == "waiting",
+      str(noted))
+check("it is said once", noted.get("stranded_noted") is True, str(noted))
+check("and it is not prompted again for it", prompts == [], str(prompts))
 
 # ---- restarting a session that cannot use the new account ----------------
 #
@@ -1249,8 +1276,10 @@ A.RESTART_STRANDED = False
 a_stranded_wall()
 A.tick({"w1:pA": CODEX_INFO}, set())
 check("off, it only says what happened", tried == [], str(tried))
-check("and the wall gives up", A.load_walls()["w1:pA"]["status"] == "gaveup",
-      str(A.load_walls()["w1:pA"]["status"]))
+check("and the wall keeps its clock",
+      A.load_walls()["w1:pA"].get("stranded_noted") is True
+      and A.load_walls()["w1:pA"]["status"] == "waiting",
+      str(A.load_walls()["w1:pA"]))
 
 A.RESTART_STRANDED = True
 a_stranded_wall()
