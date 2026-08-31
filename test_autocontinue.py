@@ -949,6 +949,14 @@ check("it is not typed into while it waits on you", prompts == [], str(prompts))
 check("but the wall is still remembered", "w1:pA" in A.load_walls(),
       str(A.load_walls()))
 
+print("\nand a wall that is not due yet is left on its own clock")
+A._save(A.WALLS, {"w1:pA": walled_pane(3600)})
+was = A.load_walls()["w1:pA"]["resume_at"]
+A.tick({"w1:pA": {"agent_status": "blocked", "agent": "codex"}}, set())
+check("blocking does not push a reset that is still ahead",
+      A.load_walls()["w1:pA"]["resume_at"] == was,
+      str(A.load_walls()["w1:pA"]["resume_at"] - was))
+
 print("\nand the nudge lands once that same pane is idle again")
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("it is prompted on the later tick", len(prompts) == 1, str(prompts))

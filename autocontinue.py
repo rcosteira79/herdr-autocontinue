@@ -1614,7 +1614,14 @@ def tick(agents, pending):
                 # Waiting on you, so it is never typed into. The nudge it is owed
                 # waits with it, rather than the wall being forgotten and the
                 # pane left sitting idle with its window already open.
-                defer_wall(pane_id, now + BUSY_RETRY_S)
+                #
+                # Only a wall that is already due is pushed out. Pushing one
+                # whose reset is still ahead just fought the restamp that pulls
+                # it back to the account's own time, a minute at a time, and
+                # wrote a line about it on every sweep for as long as the agent
+                # stayed blocked.
+                if wall["resume_at"] <= now:
+                    defer_wall(pane_id, now + BUSY_RETRY_S)
                 set_badge(pane_id, load_walls().get(pane_id, wall), armed)
                 pending.discard(pane_id)
                 continue
