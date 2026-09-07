@@ -31,6 +31,7 @@ Subcommands:
   daemon                  the poll loop itself (spawned, detached)
 """
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -1451,6 +1452,14 @@ def _waited_for_shell(pane_id):
     return False
 
 
+def restart_name(pane_id, info):
+    """Use a registered name, never a display title, for agent start."""
+    name = info.get("name")
+    if isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name):
+        return name
+    return "autocontinue-" + hashlib.sha256(pane_id.encode()).hexdigest()[:18]
+
+
 def restart_session(pane_id, info, kind):
     """Quit the agent in a pane and start it again on its own session.
 
@@ -1467,6 +1476,7 @@ def restart_session(pane_id, info, kind):
     if session.get("kind") != "id" or not session.get("value"):
         log("%s: no session id to resume, so not restarting it" % pane_id)
         return False
+    name = restart_name(pane_id, info)
     log("%s: restarting it on its own session to pick the new account up"
         % pane_id)
     res = herdr("agent", "prompt", pane_id, RESTART_QUIT)
@@ -1478,7 +1488,7 @@ def restart_session(pane_id, info, kind):
         log("%s: still running after %r, so it is left as it is"
             % (pane_id, RESTART_QUIT))
         return False
-    res = herdr("agent", "start", label_of(info), "--kind", kind,
+    res = herdr("agent", "start", name, "--kind", kind,
                 "--pane", pane_id, "--", "resume", session["value"])
     if res.returncode != 0:
         log("%s: could not start it again: %s"

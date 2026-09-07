@@ -1218,6 +1218,28 @@ check("it starts the same pane again, resuming that session",
 check("and the resumed session gets one continue",
       calls[2][:4] == ("agent", "prompt", "w1:pA", "continue"), str(calls[2]))
 
+print("\nrestart names obey herdr's contract even for unnamed agents")
+import re
+for display in ["feat-dash-01-dashboar...", "My Codex session", "a" * 80, "🤖 Codex"]:
+    unnamed = dict(CODEX_INFO, terminal_title_stripped=display)
+    unnamed.pop("name")
+    calls = restart_calls()
+    recorder = A.herdr
+
+    def validate_start(*args, **kwargs):
+        if args[:2] == ("agent", "start") and not re.fullmatch(
+                r"[a-z][a-z0-9_-]{0,31}", args[2]):
+            return _Ran(1)
+        return recorder(*args, **kwargs)
+
+    A.herdr = validate_start
+    check("restart accepts display title %r" % display,
+          A.restart_session("w1:pA", unnamed, "codex") is True)
+    check("the previous session is resumed", calls[1][-1] == CODEX_INFO["agent_session"]["value"])
+check("registered names are preserved", A.restart_name("w1:pA", CODEX_INFO) == "mindera-people")
+check("unnamed panes get different names",
+      A.restart_name("w1:pA", {}) != A.restart_name("w1:pB", {}))
+
 print("\nherdr reporting the pane as unknown is codex being gone too")
 calls = restart_calls()
 A.live_agents = lambda: {"w1:pA": dict(CODEX_INFO, agent_status="unknown")}
