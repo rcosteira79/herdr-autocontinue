@@ -1311,6 +1311,69 @@ A.live_agents = REAL_AGENTS
 A.subprocess.run, A.herdr = REAL_RUN, REAL_HERDR
 A.account_block = REAL_BLOCK
 
+print("\narmed badges survive unreadable panes and dismissed walls")
+from unittest.mock import patch
+
+for info, text in [
+        ({"agent": "claude", "agent_status": "idle"}, None),
+        ({"agent": "", "agent_status": "unknown"}, None),
+        ({"agent": "claude", "agent_status": "idle"}, "Usage limit reached")]:
+    A.save_armed({"w1:pA"})
+    A.save_walls({})
+    with patch.object(A, "herdr") as report, \
+            patch.object(A, "pane_text", return_value=text):
+        A.tick({"w1:pA": info}, set())
+    check("armed badge refreshed for %r / %r" % (info["agent"], text),
+          any("wall=" + A.GLYPH_ARMED in call.args
+              for call in report.call_args_list))
+
+A.save_walls({"w1:pA": a_wall(3600)})
+with patch.object(A, "herdr") as report:
+    A.drop_wall("w1:pA", "dismissed from the list")
+check("dismissing a wall retains the armed glyph",
+      any("wall=" + A.GLYPH_ARMED in call.args
+          for call in report.call_args_list))
+
+print("\nthe wake handler is ready before the daemon publishes its pid")
+import subprocess
+try:
+    signal_check = subprocess.run(
+        [sys.executable, "-c", """
+import os, threading
+import autocontinue as A
+A._install_wake_handler()
+# Reproduce a signal arriving while the old Event's condition was held.
+with getattr(A._wake, '_cond', threading.Lock()):
+    for _ in range(100):
+        os.kill(os.getpid(), A.WAKE_SIGNAL)
+assert A._wake.wait(0.2)
+A._wake.clear()
+assert not A._wake.wait(0.01)
+"""], cwd=os.path.dirname(os.path.abspath(__file__)), timeout=5,
+        capture_output=True, text=True)
+    check("status signals cannot deadlock the wake mechanism",
+          signal_check.returncode == 0, signal_check.stderr)
+except subprocess.TimeoutExpired:
+    check("status signals cannot deadlock the wake mechanism", False, "deadlocked")
+
+class StartupChecked(BaseException):
+    pass
+
+class CheckStartupLock:
+    def __enter__(self):
+        check("handler installed before the pidfile lock", install.called)
+        raise StartupChecked()
+
+    def __exit__(self, *args):
+        pass
+
+with patch.object(A, "_install_wake_handler", return_value=True) as install, \
+        patch.object(A, "_Lock", CheckStartupLock):
+    try:
+        A.cmd_daemon([])
+    except StartupChecked:
+        pass
+
 shutil.rmtree(STATE, ignore_errors=True)
 print("\n%s — %d of the checks failed"
       % ("FAILED" if FAILED else "PASSED", len(FAILED)))

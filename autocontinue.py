@@ -39,7 +39,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -644,7 +643,7 @@ def drop_wall(pane_id, why):
 
     if _update_walls(mutate) is not None:
         log(f"{pane_id}: wall cleared ({why})")
-    clear_badge(pane_id)
+    refresh_badge(pane_id, None, load_armed())
 
 
 # ---- account usage --------------------------------------------------------
@@ -1577,6 +1576,8 @@ def tick(agents, pending):
     for pane_id, info in agents.items():
         kind = kind_of(info)
         if kind is None:
+            if pane_id in armed:
+                refresh_badge(pane_id, walls.get(pane_id), armed)
             continue
         wall = walls.get(pane_id)
         if info.get("agent_status") == "working":
@@ -1588,6 +1589,7 @@ def tick(agents, pending):
 
         text = pane_text(pane_id)
         if text is None:
+            refresh_badge(pane_id, wall, armed)
             continue  # unreadable this tick; leave the wall as it stands
         hit = find_wall(text, kind)
         if hit is None and kind in ACCOUNT_KINDS:
@@ -1648,6 +1650,7 @@ def tick(agents, pending):
             # half-drawn TUI is not a wall.
             if pane_id not in pending:
                 pending.add(pane_id)
+                refresh_badge(pane_id, None, armed)
                 continue
             pending.discard(pane_id)
             wall = new_wall(pane_id, kind, info, hit)
@@ -1782,7 +1785,35 @@ def ensure_daemon():
 # slows down.
 
 WAKE_SIGNAL = signal.SIGUSR1
-_wake = threading.Event()
+
+
+class _SignalWake:
+    """Main-thread wake flag: signal handlers must never acquire a lock.
+
+    Event.set() can interrupt Event.clear()/wait() while its condition lock is
+    held, deadlocking the watcher. Short sleeps bound wake latency without
+    entering a lock from the handler.
+    """
+    def __init__(self):
+        self.requested = False
+
+    def set(self):
+        self.requested = True
+
+    def clear(self):
+        self.requested = False
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while not self.requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(remaining, 0.1))
+        return True
+
+
+_wake = _SignalWake()
 
 
 def _install_wake_handler():
@@ -1832,6 +1863,9 @@ def cmd_on_status(argv):
 
 
 def cmd_daemon(argv):
+    # Status hooks can signal as soon as the pidfile is visible. SIGUSR1's
+    # default action terminates the process, so install its handler first.
+    woken = _install_wake_handler()
     with _Lock():
         existing = _read_pid()
         if _pid_alive(existing) and existing != os.getpid():
@@ -1840,7 +1874,6 @@ def cmd_daemon(argv):
         with open(PIDFILE, "w") as f:
             f.write(str(os.getpid()))
 
-    woken = _install_wake_handler()
     # Say whether rotation is on. It is off whenever the profile list is empty,
     # which is both how it is turned off and how a daemon that cannot find its
     # config.toml comes up — and that second one used to be invisible.
@@ -1857,6 +1890,7 @@ def cmd_daemon(argv):
     last_tick = 0.0
     try:
         while True:
+            _wake.clear()
             agents = live_agents()
             if agents is None:
                 server_fails += 1
@@ -1872,7 +1906,6 @@ def cmd_daemon(argv):
             last_tick = time.time()
             # Sleep until the sweep is due or an event wakes us, whichever comes
             # first, then hold MIN_TICK_S so a burst of events is one tick.
-            _wake.clear()
             if _wake.wait(POLL_S):
                 remaining = MIN_TICK_S - (time.time() - last_tick)
                 if remaining > 0:
