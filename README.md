@@ -483,6 +483,14 @@ has gone. Those get `⚠` rather than a countdown: this plugin will not type int
 them, and their own harness would be restarting them against credentials that
 are no longer installed.
 
+A switch needs the account to be spent, and the usage endpoint cannot always
+say so: while it is rate limited its last answer goes stale, and a stale answer
+is no answer. Rotation then leans on the wall instead. A wall the account itself
+raised went up while the reading was fresh and stands only because nothing has
+confirmed the window reopened, so it is reason enough to move. A wall the pane's
+own text raised is not — that is the stranded case, where the session is using
+credentials this account does not have, and a switch is what put it there.
+
 It ranks the accounts it may switch to. `account-switch` publishes what each
 saved account has left, parked ones included, so rotation takes an account with
 room first, then one nobody has read in the last half hour, then the accounts

@@ -1011,6 +1011,27 @@ def account_hit(kind, fetch=True):
     )
 
 
+def account_spent(wall, kind):
+    """Whether the account behind a walled pane is spent, for the rotation gate.
+
+    A live answer whenever there is one. When the account cannot be read, the
+    wall the account itself raised is the last good answer: it went up while
+    the reading was fresh, and it still stands only because nothing has
+    confirmed the window reopened. A wall the pane's own text raised says
+    nothing about the account — that is the stranded case, where the session is
+    using credentials this account does not have, and a switch is what put it
+    there.
+
+    Asking for a live answer alone stopped rotation for the whole of every rate
+    limit rest: hours a day, and exactly the hours the account is most likely
+    to really be spent.
+    """
+    if account_block(kind):
+        return True
+    return (account_unknown(kind)
+            and str(wall.get("rule") or "").startswith("account:"))
+
+
 def account_reset_for(kind):
     """The soonest reset a *spent* window of that account has, for a blank time.
 
@@ -1812,7 +1833,7 @@ def tick(agents, pending):
         # bills to is spent. A switch is machine-wide, so an unarmed pane never
         # triggers one.
         if (pane_id in armed and wall["status"] == "waiting"
-                and kind in ACCOUNT_KINDS and account_block(kind)
+                and kind in ACCOUNT_KINDS and account_spent(wall, kind)
                 and rotate_account(kind)):
             # The account we just moved to may be spent as well. Prompting is
             # how that shows: the wall returns and the ranking is asked again.

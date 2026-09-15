@@ -1231,6 +1231,48 @@ kept = A.restamp_wall("w1:pB", timed, "claude")
 check("its backoff is left alone", kept["resume_at"] == timed["resume_at"],
       "%ds" % (kept["resume_at"] - timed["resume_at"]))
 
+# ---- rotation, while the account cannot be read --------------------------
+#
+# The rotation gate asked for a live "is the account spent" answer, which a
+# reading too old to act on cannot give. Rotation then stopped for the whole of
+# every rate limit rest — hours a day, and exactly the hours the account is most
+# likely to really be spent. The wall the account itself raised is the last good
+# answer: it went up while the reading was fresh, and it stands only because
+# nothing has confirmed the window reopened.
+
+print("\nrotation still fires on a wall the account raised")
+A._save(A.ARMED, ["w1:pB"])
+account_wall = dict(a_wall(3600))
+account_wall["pane_id"] = "w1:pB"
+A._save(A.WALLS, {"w1:pB": account_wall})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+resting_cache(STALE_AGE_S)
+rotations = []
+REAL_ROTATE = A.rotate_account
+A.rotate_account = lambda kind: (rotations.append(kind) or False)
+A.tick(idle_claude, set())
+check("the switch is considered", rotations == ["claude"], str(rotations))
+
+print("\nbut not on one the pane's own text raised")
+text_wall = dict(account_wall)
+text_wall["rule"] = "claude-5h"             # a text rule, not the account
+A._save(A.WALLS, {"w1:pB": text_wall})
+A.pane_text = lambda pane_id, lines=None: "5-hour limit reached \u2219 resets 11pm"
+del rotations[:]
+A.tick(idle_claude, set())
+check("the account never said this one was spent", rotations == [], str(rotations))
+
+print("\nand never while the account is readable and has room")
+A._save(A.WALLS, {"w1:pB": dict(account_wall)})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+resting_cache(10, percent=4)                 # read just now, and nothing spent
+del rotations[:]
+A.tick(idle_claude, set())
+check("a readable account with room triggers no switch", rotations == [],
+      str(rotations))
+
+A.rotate_account = REAL_ROTATE
+A._save(A.ARMED, [])
 A.live_agents = REAL_LIVE_AGENTS
 A._fetch_usage = REAL_FETCH
 A._save(A.USAGE_CACHE, {})
