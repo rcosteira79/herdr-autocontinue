@@ -666,6 +666,10 @@ USAGE_MIN_GAP_S = _num("AUTOCONTINUE_USAGE_MIN_GAP_S", 30.0)
 USAGE_TIMEOUT_S = _num("AUTOCONTINUE_USAGE_TIMEOUT_S", 5.0)
 # How long to leave an account alone after it answers 429.
 USAGE_BACKOFF_S = _num("AUTOCONTINUE_USAGE_BACKOFF_S", 900.0)
+# And how old the answer it keeps serving through that rest may get
+# before it stops counting as an answer. One rest long: past that,
+# the read has failed for longer than it has succeeded.
+USAGE_STALE_S = _num("AUTOCONTINUE_USAGE_STALE_S", 900.0)
 USE_ACCOUNT = _flag("AUTOCONTINUE_USE_ACCOUNT", default=True)
 
 
@@ -828,6 +832,27 @@ def _claude_windows(body):
     return windows
 
 
+def _fresh(cached):
+    """The windows in a cache entry, or None when they are too old to act on.
+
+    A rate limited read rests for USAGE_BACKOFF_S and keeps serving the last
+    answer meanwhile. With no limit on its age that answer outlives the account
+    it describes: on 15 September a reading taken 34 minutes earlier still said
+    100%, and it raised an account wall on sixteen idle panes in one second
+    while the account was reading 21%. Panes went on working throughout.
+
+    Past this age the entry says what an account nobody could ask says, which
+    is nothing. It never says "the account has room" — that would clear the
+    wall of every pane really waiting one out.
+    """
+    windows = cached.get("windows")
+    if windows is None:
+        return None
+    if (time.time() - (cached.get("fetched_at") or 0)) >= USAGE_STALE_S:
+        return None
+    return windows
+
+
 def usage_windows(provider="claude", force=False):
     """Windows for one provider's account, newest cached.
 
@@ -848,7 +873,7 @@ def usage_windows(provider="claude", force=False):
     if cached.get("windows") is not None and (now - fetched_at) < USAGE_TTL_S and not force:
         return cached["windows"]
     if (now - (cached.get("tried_at") or 0)) < USAGE_MIN_GAP_S and not force:
-        return cached.get("windows") or []
+        return _fresh(cached) or []
     cached["tried_at"] = now
     store[provider] = cached
     _save(USAGE_CACHE, store)
@@ -865,9 +890,9 @@ def usage_windows(provider="claude", force=False):
                 % (provider, int(USAGE_BACKOFF_S)))
         else:
             log("usage api (%s): %s" % (provider, exc))
-        return cached.get("windows") or []
+        return _fresh(cached) or []
     if not isinstance(body, dict):
-        return cached.get("windows") or []
+        return _fresh(cached) or []
     windows = (_codex_windows(body) if provider == "codex"
                else _claude_windows(body))
     store[provider] = {"fetched_at": now, "tried_at": now, "windows": windows}
@@ -929,13 +954,34 @@ def account_unknown(kind=None):
     if not USE_ACCOUNT or not provider:
         return False
     cached = (_load(USAGE_CACHE, {}) or {}).get(provider) or {}
-    return cached.get("windows") is None
+    return _fresh(cached) is None
 
 
 def account_has_room(kind):
     """True when the account behind a kind was read, and has room to work."""
     return (kind in ACCOUNT_KINDS and not account_unknown(kind)
             and not account_block(kind))
+
+
+def account_hit(kind):
+    """The wall an account with no room raises, in find_wall's own shape.
+
+    No wording matched, but the account itself is out. Every pane billed to it
+    is stuck whatever its harness prints on screen, so this is what detection
+    falls back to — and what `scan` has to report, or the one command for
+    reading detection stays blind to the walls the daemon actually raised.
+    """
+    if kind not in ACCOUNT_KINDS:
+        return None
+    spent = account_block(kind)
+    if not spent:
+        return None
+    resets_at, window, percent = spent
+    return (
+        "account:%s" % window,
+        "account window %s at %s%%" % (window, percent),
+        "resets %s" % datetime.fromtimestamp(resets_at).isoformat(),
+    )
 
 
 def account_reset_for(kind):
@@ -1601,18 +1647,7 @@ def tick(agents, pending):
         if text is None:
             refresh_badge(pane_id, wall, armed)
             continue  # unreadable this tick; leave the wall as it stands
-        hit = find_wall(text, kind)
-        if hit is None and kind in ACCOUNT_KINDS:
-            # No wording matched, but the account itself is out. Every pane
-            # billed to it is stuck whatever its harness prints on screen.
-            spent = account_block(kind)
-            if spent:
-                resets_at, window, percent = spent
-                hit = (
-                    "account:%s" % window,
-                    "account window %s at %s%%" % (window, percent),
-                    "resets %s" % datetime.fromtimestamp(resets_at).isoformat(),
-                )
+        hit = find_wall(text, kind) or account_hit(kind)
         if (hit is None and wall
                 and str(wall.get("rule") or "").startswith("account:")
                 and account_unknown(kind)):
@@ -2085,7 +2120,7 @@ def cmd_scan(argv):
             print(f"?      {flag}{pane_id:<10} {label_of(info):<18} "
                   f"{info.get('agent_status','?'):<8} could not read pane")
             continue
-        hit = find_wall(text, kind)
+        hit = find_wall(text, kind) or account_hit(kind)
         if not hit:
             print(f"-      {flag}{pane_id:<10} {label_of(info):<18} "
                   f"{info.get('agent_status','?'):<8} no wall")

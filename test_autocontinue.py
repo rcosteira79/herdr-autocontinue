@@ -6,7 +6,9 @@ plugin. The state directory is a temporary one, the herdr CLI is replaced, and
 no account is ever switched: the rotation checks stop at the command that would
 be run.
 """
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import shutil
@@ -1009,6 +1011,100 @@ A.tick({"w1:pA": {"agent_status": "idle", "agent": "codex"}}, set())
 check("the pane is prompted", len(prompts) == 1, str(prompts))
 
 A._fetch_usage = REAL_FETCH
+A.account_block = lambda kind=None: None
+
+# ---- a reading too old to act on -----------------------------------------
+#
+# The usage api rate limits often, and the rest that follows keeps serving the
+# last answer with no limit on how old it is. On 15 September a reading taken
+# 34 minutes earlier still said 100%, and it raised an account wall on sixteen
+# idle panes in the same second. The account was reading 21% at the time, and
+# panes went on working throughout — which an account with no room cannot do.
+#
+# A reading that old is not the answer "the account is spent", and it is not
+# the answer "the account has room" either. It is the same nothing a rate
+# limited read leaves behind, so it is treated as one.
+
+STALE_AGE_S = 2044                          # the age the reading had that day
+
+REAL_LIVE_AGENTS = A.live_agents
+A.account_block = REAL_BLOCK
+A._fetch_usage = lambda provider: (_ for _ in ()).throw(_RateLimited())
+
+
+def resting_cache(age_s, percent=100):
+    """A spent claude window read `age_s` ago, with the 429 rest still on."""
+    now = time.time()
+    A._save(A.USAGE_CACHE, {"claude": {
+        "fetched_at": now - age_s,
+        "tried_at": now + A.USAGE_BACKOFF_S,
+        "windows": [{"kind": "session", "group": "session", "percent": percent,
+                     "severity": "normal", "resets_at": now + 3600,
+                     "blocked": None}]}})
+
+
+print("\na reading too old to act on is not a block")
+resting_cache(STALE_AGE_S)
+check("a stale spent window does not block",
+      A.account_block("claude") is None, str(A.account_block("claude")))
+check("it reads as an account nobody could ask",
+      A.account_unknown("claude") is True)
+check("and is never mistaken for an account with room",
+      A.account_has_room("claude") is False)
+
+print("\nwhile a reading taken just now still blocks")
+resting_cache(10)
+check("a fresh spent window blocks",
+      A.account_block("claude") is not None, str(A.account_block("claude")))
+check("and the account is not unknown",
+      A.account_unknown("claude") is False)
+
+print("\nno pane is walled on a reading too old to act on")
+A._save(A.ARMED, [])
+A._save(A.WALLS, {})
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+idle_claude = {"w1:pB": {"agent_status": "idle", "agent": "claude"}}
+resting_cache(STALE_AGE_S)
+pending = set()
+A.tick(idle_claude, pending)
+A.tick(idle_claude, pending)                # two sightings is what it takes
+check("an idle pane is left alone", A.load_walls() == {}, str(A.load_walls()))
+
+print("\nbut a reading taken just now still walls it")
+resting_cache(10)
+pending = set()
+A.tick(idle_claude, pending)
+A.tick(idle_claude, pending)
+check("the account wall is raised", "w1:pB" in A.load_walls(),
+      str(A.load_walls()))
+
+print("\nand a wall already up stands while the reading is too old")
+resting_cache(STALE_AGE_S)
+A.tick(idle_claude, set())
+check("the wall is not cleared", "w1:pB" in A.load_walls(),
+      str(A.load_walls()))
+
+# ---- what scan makes of an account wall ----------------------------------
+#
+# scan is how a pattern is checked against a live wall, and it only ever asked
+# the text rules. It printed "no wall" for all sixteen panes the daemon had
+# walled that day, which is the one report that could have shown the cause.
+
+print("\nscan reports the walls the account raised, not only the ones on screen")
+A._save(A.WALLS, {})
+A.live_agents = lambda: dict(idle_claude)
+resting_cache(10)
+report = io.StringIO()
+with contextlib.redirect_stdout(report):
+    A.cmd_scan([])
+check("the account wall is in the report", "account:session" in report.getvalue(),
+      report.getvalue().strip())
+check("and scan still wrote nothing", A.load_walls() == {}, str(A.load_walls()))
+
+A.live_agents = REAL_LIVE_AGENTS
+A._fetch_usage = REAL_FETCH
+A._save(A.USAGE_CACHE, {})
+A._save(A.WALLS, {})
 A.account_block = lambda kind=None: None
 
 # ---- the panes a switch moves out from under -----------------------------

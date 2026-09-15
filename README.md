@@ -251,6 +251,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
 | `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
 | `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
+| `AUTOCONTINUE_USAGE_STALE_S` | `900` | past this age, an account answer counts as no answer |
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
@@ -380,6 +381,13 @@ which keep working on their own. `AUTOCONTINUE_USE_ACCOUNT=0` turns it off. The
 answer is cached for `AUTOCONTINUE_USAGE_TTL_S` (180s) and asked for at most
 once per `AUTOCONTINUE_USAGE_MIN_GAP_S` (30s), shared across every pane, so a
 ten-second loop over seventeen panes is still one request every three minutes.
+
+The endpoint also rate limits. A 429 rests the account for 15 minutes, and the
+last answer is served meanwhile — but only until it is
+`AUTOCONTINUE_USAGE_STALE_S` (900s) old, one rest long. Past that it counts as
+no answer at all: walls already up stand, no new one is raised from it, and it
+never reads as "the account has room". A reading 34 minutes old once said 100%
+and put a countdown on sixteen idle panes while the account was at 21%.
 
 ## Rotating to another account
 
@@ -554,7 +562,9 @@ herdr plugin action invoke scan --plugin rcosteira.autocontinue
 ```
 
 It prints, per agent, whether a wall was found, which rule matched, the line it
-matched, and the reset time it parsed.
+matched, and the reset time it parsed. A wall the account raised rather than the
+text is reported too, as rule `account:<window>` — so what `scan` reports is
+what the daemon acts on.
 
 **Fix the rules without touching code.** Copy `patterns.default.json` to
 `$(herdr plugin config-dir rcosteira.autocontinue)/patterns.json` and edit it —
