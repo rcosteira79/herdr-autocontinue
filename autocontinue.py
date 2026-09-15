@@ -870,8 +870,12 @@ def usage_windows(provider="claude", force=False):
         store = {}
     cached = store.get(provider) or {}
     fetched_at = cached.get("fetched_at") or 0
-    if cached.get("windows") is not None and (now - fetched_at) < USAGE_TTL_S and not force:
-        return cached["windows"]
+    # _fresh first, or this path alone would answer from an entry every other
+    # path calls unreadable. The two ages cross whenever the stale limit is set
+    # below the TTL, or the TTL above it.
+    fresh = _fresh(cached)
+    if fresh is not None and (now - fetched_at) < USAGE_TTL_S and not force:
+        return fresh
     if (now - (cached.get("tried_at") or 0)) < USAGE_MIN_GAP_S and not force:
         return _fresh(cached) or []
     cached["tried_at"] = now

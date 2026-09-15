@@ -1059,6 +1059,20 @@ check("a fresh spent window blocks",
 check("and the account is not unknown",
       A.account_unknown("claude") is False)
 
+print("\nand the cached fast path obeys the same age limit")
+# The TTL fast path returned its entry without asking how old it was. That only
+# shows once the two settings cross — a stale limit set below the TTL, or a TTL
+# raised above it — and then one entry answered two ways at once: account_block
+# called it spent while account_unknown called it unreadable.
+was_stale_s = A.USAGE_STALE_S
+A.USAGE_STALE_S = 60.0                      # below USAGE_TTL_S
+resting_cache(120)                          # too old to act on, young enough to reuse
+check("the fast path does not serve a stale entry",
+      A.account_block("claude") is None, str(A.account_block("claude")))
+check("and it reads as unknown, the same as every other path",
+      A.account_unknown("claude") is True)
+A.USAGE_STALE_S = was_stale_s
+
 print("\nno pane is walled on a reading too old to act on")
 A._save(A.ARMED, [])
 A._save(A.WALLS, {})
