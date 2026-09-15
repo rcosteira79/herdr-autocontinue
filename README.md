@@ -251,7 +251,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
 | `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
 | `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
-| `AUTOCONTINUE_USAGE_STALE_S` | `900` | past this age, an account answer counts as no answer; `0` makes every answer stale |
+| `AUTOCONTINUE_USAGE_STALE_S` | `900` | past this age, an account answer counts as no answer; `0` turns the age rule off |
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |

@@ -1231,6 +1231,33 @@ kept = A.restamp_wall("w1:pB", timed, "claude")
 check("its backoff is left alone", kept["resume_at"] == timed["resume_at"],
       "%ds" % (kept["resume_at"] - timed["resume_at"]))
 
+# A limit of zero is how someone turns the rule off, so it has to mean "no age
+# limit" — not "every answer is stale the moment it arrives", which would call a
+# reply that just came back over the wire too old to use, and leave account_block
+# and account_unknown contradicting each other again.
+print("\na limit of zero turns the age rule off rather than inverting it")
+was_stale_s = A.USAGE_STALE_S
+A.USAGE_STALE_S = 0
+resting_cache(STALE_AGE_S)
+check("an old answer still counts", A.account_block("claude") is not None,
+      str(A.account_block("claude")))
+check("and the account is not unknown", A.account_unknown("claude") is False,
+      str(A.account_unknown("claude")))
+A.USAGE_STALE_S = was_stale_s
+
+# scan reports what detection would make of the panes, so it has to honour the
+# switch that turns account detection off. Reading the cache directly walked
+# straight past it.
+print("\nand scan honours the switch that turns account detection off")
+was_use = A.USE_ACCOUNT
+A.USE_ACCOUNT = False
+resting_cache(10)
+check("the cached path says nothing either", A.cached_block("claude") is None,
+      str(A.cached_block("claude")))
+check("matching the daemon's own answer", A.account_block("claude") is None,
+      str(A.account_block("claude")))
+A.USE_ACCOUNT = was_use
+
 # ---- rotation, while the account cannot be read --------------------------
 #
 # The rotation gate asked for a live "is the account spent" answer, which a

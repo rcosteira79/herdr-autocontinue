@@ -848,7 +848,11 @@ def _fresh(cached):
     windows = cached.get("windows")
     if windows is None:
         return None
-    if (time.time() - (cached.get("fetched_at") or 0)) >= USAGE_STALE_S:
+    # Zero is how someone turns the rule off. Read literally it does the
+    # opposite — every answer stale the moment it lands, account detection gone
+    # — and a reply still warm from the wire would be called too old to use.
+    if USAGE_STALE_S > 0 and (
+            time.time() - (cached.get("fetched_at") or 0)) >= USAGE_STALE_S:
         return None
     return windows
 
@@ -960,7 +964,9 @@ def cached_block(kind):
     a rate limit episode could cause the next one.
     """
     provider = KIND_PROVIDER.get(kind)
-    if not provider:
+    # usage_windows checks USE_ACCOUNT before it asks anything, so reading the
+    # cache straight past it made scan report a wall the daemon never raises.
+    if not USE_ACCOUNT or not provider:
         return None
     cached = (_load(USAGE_CACHE, {}) or {}).get(provider) or {}
     return _soonest_spent(_fresh(cached) or [])
