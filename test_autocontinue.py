@@ -1048,7 +1048,7 @@ resting_cache(STALE_AGE_S)
 check("a stale spent window does not block",
       A.account_block("claude") is None, str(A.account_block("claude")))
 check("it reads as an account nobody could ask",
-      A.account_unknown("claude") is True)
+      A.account_unknown("claude") is True, str(A.account_unknown("claude")))
 check("and is never mistaken for an account with room",
       A.account_has_room("claude") is False)
 
@@ -1073,11 +1073,51 @@ check("and it reads as unknown, the same as every other path",
       A.account_unknown("claude") is True)
 A.USAGE_STALE_S = was_stale_s
 
+print("\nand the age limit is the boundary it names")
+resting_cache(A.USAGE_STALE_S - 1)
+check("a second inside the limit still blocks",
+      A.account_block("claude") is not None, str(A.account_block("claude")))
+resting_cache(A.USAGE_STALE_S + 1)
+check("a second past it does not",
+      A.account_block("claude") is None, str(A.account_block("claude")))
+
+# Every check above reaches _fresh through the min-gap branch, because
+# resting_cache always leaves tried_at in the future. Let the rest expire so
+# the rate limited fetch itself fires, and the 429 return path is covered too.
+print("\nand the rate limited read serves nothing too old either")
+now = time.time()
+A._save(A.USAGE_CACHE, {"claude": {
+    "fetched_at": now - STALE_AGE_S,
+    "tried_at": now - A.USAGE_MIN_GAP_S - 1,    # the rest has expired
+    "windows": [{"kind": "session", "group": "session", "percent": 100,
+                 "severity": "normal", "resets_at": now + 3600, "blocked": None}]}})
+check("the 429 path serves nothing", A.account_block("claude") is None,
+      str(A.account_block("claude")))
+check("and the entry it kept is still unreadable",
+      A.account_unknown("claude") is True, str(A.account_unknown("claude")))
+
+# The account is the fallback for wording nobody wrote a rule for. A rule that
+# does match has read the pane itself, so it wins — and it carries the time the
+# harness printed rather than the account's window.
+print("\na rule that matches still wins over the account")
+A._save(A.WALLS, {})
+A._save(A.ARMED, [])
+idle_claude = {"w1:pB": {"agent_status": "idle", "agent": "claude"}}
+resting_cache(10)                           # the account reads spent as well
+A.pane_text = lambda pane_id, lines=None: "5-hour limit reached ∙ resets 11pm"
+pending = set()
+A.tick(idle_claude, pending)
+A.tick(idle_claude, pending)
+raised = A.load_walls().get("w1:pB") or {}
+check("the wall carries the rule the text matched",
+      not str(raised.get("rule", "")).startswith("account:"), str(raised.get("rule")))
+A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
+A._save(A.WALLS, {})
+
 print("\nno pane is walled on a reading too old to act on")
 A._save(A.ARMED, [])
 A._save(A.WALLS, {})
 A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
-idle_claude = {"w1:pB": {"agent_status": "idle", "agent": "claude"}}
 resting_cache(STALE_AGE_S)
 pending = set()
 A.tick(idle_claude, pending)

@@ -885,7 +885,8 @@ def usage_windows(provider="claude", force=False):
         body = _fetch_usage(provider)
     except Exception as exc:
         # A 429 means asked too often, so retrying on the usual gap only digs
-        # in. Sit the account out and keep serving the last answer.
+        # in. Sit the account out and keep serving the last answer — for as
+        # long as _fresh still counts it as one, which is not the whole rest.
         if getattr(exc, "code", None) == 429:
             cached["tried_at"] = now + USAGE_BACKOFF_S - USAGE_MIN_GAP_S
             store[provider] = cached
