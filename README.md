@@ -251,7 +251,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_ACCOUNT_SEVERITIES` | *(empty)* | extra `severity` values that mean spent |
 | `AUTOCONTINUE_USAGE_TTL_S` | `180` | how long an account answer is reused |
 | `AUTOCONTINUE_USAGE_MIN_GAP_S` | `30` | minimum gap between account requests |
-| `AUTOCONTINUE_USAGE_STALE_S` | `900` | past this age, an account answer counts as no answer |
+| `AUTOCONTINUE_USAGE_STALE_S` | `900` | past this age, an account answer counts as no answer; `0` makes every answer stale |
 | `AUTOCONTINUE_ROTATE_PROFILES` | *(empty)* | profiles rotation may switch to; empty disables it |
 | `AUTOCONTINUE_ROTATE_COOLDOWN_S` | `300` | minimum gap between account switches |
 | `AUTOCONTINUE_ROTATE_STALE_S` | `1800` | past this age, an account's reading counts as no reading |
@@ -563,8 +563,9 @@ herdr plugin action invoke scan --plugin rcosteira.autocontinue
 
 It prints, per agent, whether a wall was found, which rule matched, the line it
 matched, and the reset time it parsed. A wall the account raised rather than the
-text is reported too, as rule `account:<window>` — so what `scan` reports is
-what the daemon acts on.
+text is reported too, as rule `account:<window>`. It reads the account answer
+the daemon already cached rather than asking again, so `scan` stays dry — and it
+says so when there is no usable answer on disk.
 
 **Fix the rules without touching code.** Copy `patterns.default.json` to
 `$(herdr plugin config-dir rcosteira.autocontinue)/patterns.json` and edit it —

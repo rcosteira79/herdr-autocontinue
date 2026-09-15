@@ -932,17 +932,37 @@ def _spent(window):
     return isinstance(percent, (int, float)) and percent >= ACCOUNT_PERCENT
 
 
+def _soonest_spent(windows):
+    """(resets_at, window, percent) for the spent window that reopens first."""
+    spent = [w for w in windows if _spent(w) and w.get("resets_at")]
+    if not spent:
+        return None
+    soonest = min(spent, key=lambda w: w["resets_at"])
+    return soonest["resets_at"], soonest.get("kind"), soonest.get("percent")
+
+
 def account_block(kind=None):
     """(resets_at, window, percent) for a spent window of that kind's account."""
     provider = KIND_PROVIDER.get(kind) if kind else "claude"
     if not provider:
         return None
-    spent = [w for w in usage_windows(provider)
-             if _spent(w) and w.get("resets_at")]
-    if not spent:
+    return _soonest_spent(usage_windows(provider))
+
+
+def cached_block(kind):
+    """The same answer from what is already on disk, without asking again.
+
+    scan is the dry report: its own docstring, the plugin manifest and the
+    README all promise it writes nothing and sends nothing. Asking here would
+    write tried_at and issue the request — and a 429 the debugging command
+    earned rests the daemon for USAGE_BACKOFF_S, so the command run to explain
+    a rate limit episode could cause the next one.
+    """
+    provider = KIND_PROVIDER.get(kind)
+    if not provider:
         return None
-    soonest = min(spent, key=lambda w: w["resets_at"])
-    return soonest["resets_at"], soonest.get("kind"), soonest.get("percent")
+    cached = (_load(USAGE_CACHE, {}) or {}).get(provider) or {}
+    return _soonest_spent(_fresh(cached) or [])
 
 
 def account_unknown(kind=None):
@@ -967,17 +987,19 @@ def account_has_room(kind):
             and not account_block(kind))
 
 
-def account_hit(kind):
+def account_hit(kind, fetch=True):
     """The wall an account with no room raises, in find_wall's own shape.
 
     No wording matched, but the account itself is out. Every pane billed to it
     is stuck whatever its harness prints on screen, so this is what detection
     falls back to — and what `scan` has to report, or the one command for
     reading detection stays blind to the walls the daemon actually raised.
+
+    fetch=False reports from the cache alone, which is what keeps scan dry.
     """
     if kind not in ACCOUNT_KINDS:
         return None
-    spent = account_block(kind)
+    spent = account_block(kind) if fetch else cached_block(kind)
     if not spent:
         return None
     resets_at, window, percent = spent
@@ -1046,8 +1068,17 @@ def restamp_wall(pane_id, wall, kind):
     Only ever bring a wall forward. A later answer is no reason to make an
     armed pane wait longer, and a pane already in backoff keeps the retry it
     earned — that delay was chosen deliberately, one failed attempt at a time.
+
+    A wall that was never given a time is the exception to both. Its 20 minutes
+    is a placeholder, not an answer, so there is nothing to protect: it takes
+    the account's reset whenever one appears, later as readily as earlier, and
+    whatever it has already spent. Held to the two rules above, such a wall kept
+    the placeholder for good — a real reset hours away is later, so it was
+    refused — and the pane spent its attempts and gave up long before the window
+    it was waiting for reopened.
     """
-    if wall.get("attempts"):
+    blind = wall.get("reset_at") is None
+    if wall.get("attempts") and not blind:
         return wall
     if kind not in ACCOUNT_KINDS:
         return wall
@@ -1056,7 +1087,7 @@ def restamp_wall(pane_id, wall, kind):
         return wall
     resets_at = spent[0]
     resume_at = resets_at + GRACE_S
-    if resume_at >= (wall.get("resume_at") or 0) - RESTAMP_MIN_GAIN_S:
+    if not blind and resume_at >= (wall.get("resume_at") or 0) - RESTAMP_MIN_GAIN_S:
         return wall
 
     def mutate(walls):
@@ -1064,15 +1095,21 @@ def restamp_wall(pane_id, wall, kind):
         if entry is None:
             return None
         entry.update(reset_at=resets_at, resume_at=resume_at,
-                     reason="account (revised)")
+                     reason="account" if blind else "account (revised)")
         return dict(entry)
 
     updated = _update_walls(mutate)
     if updated is None:
         return wall
-    log("%s: the account reopens at %s, %s earlier than this wall was told"
-        % (pane_id, datetime.fromtimestamp(resume_at).strftime("%H:%M"),
-           _countdown(wall["resume_at"] - resume_at)))
+    when = datetime.fromtimestamp(resume_at).strftime("%H:%M")
+    if blind:
+        # It can move either way from a placeholder, so "earlier" would be a
+        # guess — and _countdown reads a later answer as "now".
+        log("%s: this wall had no time of its own; the account reopens at %s"
+            % (pane_id, when))
+    else:
+        log("%s: the account reopens at %s, %s earlier than this wall was told"
+            % (pane_id, when, _countdown(wall["resume_at"] - resume_at)))
     return updated
 
 
@@ -2124,10 +2161,18 @@ def cmd_scan(argv):
             print(f"?      {flag}{pane_id:<10} {label_of(info):<18} "
                   f"{info.get('agent_status','?'):<8} could not read pane")
             continue
-        hit = find_wall(text, kind) or account_hit(kind)
+        hit = find_wall(text, kind)
+        if hit is None and info.get("agent_status") != "working":
+            # tick drops a wall the moment a pane starts working, so an account
+            # that reads spent is not a wall on a pane that is moving. Without
+            # this gate the report contradicts the daemon on exactly the panes
+            # that disprove the account reading.
+            hit = account_hit(kind, fetch=False)
         if not hit:
+            note = ("" if not account_unknown(kind)
+                    else "  (the account could not be read)")
             print(f"-      {flag}{pane_id:<10} {label_of(info):<18} "
-                  f"{info.get('agent_status','?'):<8} no wall")
+                  f"{info.get('agent_status','?'):<8} no wall{note}")
             continue
         reset_at, via = parse_reset(hit[2])
         when = (datetime.fromtimestamp(reset_at + GRACE_S).strftime("%a %H:%M")

@@ -1113,7 +1113,83 @@ with contextlib.redirect_stdout(report):
     A.cmd_scan([])
 check("the account wall is in the report", "account:session" in report.getvalue(),
       report.getvalue().strip())
-check("and scan still wrote nothing", A.load_walls() == {}, str(A.load_walls()))
+check("and scan still wrote no walls", A.load_walls() == {}, str(A.load_walls()))
+
+# scan is the dry report: the manifest and the README both promise it writes
+# nothing and sends nothing. Reaching the account through account_block would
+# write tried_at and issue the request — and a 429 the debugging command earned
+# rests the daemon for fifteen minutes, so the command run to explain a rate
+# limit episode could cause the next one.
+print("\nand it stays the dry report while it does so")
+A._save(A.USAGE_CACHE, {})                  # nothing cached: a fetch would show
+fetched = []
+A._fetch_usage = lambda provider: fetched.append(provider)
+with contextlib.redirect_stdout(io.StringIO()):
+    A.cmd_scan([])
+check("scan asks the account nothing", fetched == [], str(fetched))
+check("and writes no usage cache", A._load(A.USAGE_CACHE, {}) == {},
+      str(A._load(A.USAGE_CACHE, {})))
+A._fetch_usage = lambda provider: (_ for _ in ()).throw(_RateLimited())
+
+# tick drops a wall the moment a pane starts working, so an account that reads
+# spent is not a wall on a pane that is moving. scan had no such gate and would
+# have confirmed the wrong story on the very panes that disproved it.
+print("\nand never reports a wall on a pane that is working")
+resting_cache(10)
+A.live_agents = lambda: {"w1:pB": {"agent_status": "working", "agent": "claude"}}
+report = io.StringIO()
+with contextlib.redirect_stdout(report):
+    A.cmd_scan([])
+check("a working pane has no account wall", "account:session" not in report.getvalue(),
+      report.getvalue().strip())
+A.live_agents = lambda: dict(idle_claude)
+
+# ---- a wall that was never given a time ----------------------------------
+#
+# A harness whose wording carries no reset time leans on the account for one.
+# While the account cannot be read there is no time to be had, so the wall
+# comes back on the blind 20-minute retry — and it used to keep that placeholder
+# for good: restamp_wall only ever moves a wall earlier, and a real reset hours
+# away is later. The pane then spent its five attempts and gave up, hours before
+# the window it was waiting for actually reopened.
+
+print("\na blind wall takes the account's time once there is one")
+A._save(A.WALLS, {})
+resting_cache(STALE_AGE_S)
+blind = A.new_wall("w1:pB", "claude", {"agent_status": "idle", "agent": "claude"},
+                   ("limit", "you've hit your usage limit", ""))
+check("it is blind while the account cannot be read",
+      blind["reset_at"] is None and blind["reason"] == "blind", str(blind["reason"]))
+A._save(A.WALLS, {"w1:pB": blind})
+resting_cache(10)                           # the account can be read again
+fixed = A.restamp_wall("w1:pB", blind, "claude")
+check("and takes the real reset even though it is later",
+      fixed["reset_at"] is not None, str(fixed["reset_at"]))
+check("which is hours out, not twenty minutes",
+      fixed["resume_at"] - time.time() > 3000,
+      "%dm" % ((fixed["resume_at"] - time.time()) / 60))
+
+print("\nand one already in backoff is corrected too")
+A._save(A.WALLS, {})
+resting_cache(STALE_AGE_S)
+tried = A.new_wall("w1:pB", "claude", {"agent_status": "idle", "agent": "claude"},
+                   ("limit", "you've hit your usage limit", ""))
+tried["attempts"] = 2                       # it has already been prompted twice
+A._save(A.WALLS, {"w1:pB": tried})
+resting_cache(10)
+fixed = A.restamp_wall("w1:pB", tried, "claude")
+check("a blind wall has no earned delay to protect",
+      fixed["reset_at"] is not None, str(fixed["reset_at"]))
+
+print("\nbut a wall that was given a time keeps the delay it earned")
+A._save(A.WALLS, {})
+timed = dict(a_wall(300, attempts=2))
+timed["pane_id"] = "w1:pB"
+A._save(A.WALLS, {"w1:pB": timed})
+resting_cache(10)
+kept = A.restamp_wall("w1:pB", timed, "claude")
+check("its backoff is left alone", kept["resume_at"] == timed["resume_at"],
+      "%ds" % (kept["resume_at"] - timed["resume_at"]))
 
 A.live_agents = REAL_LIVE_AGENTS
 A._fetch_usage = REAL_FETCH
