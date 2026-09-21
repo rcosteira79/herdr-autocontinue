@@ -1020,22 +1020,22 @@ def account_hit(kind, fetch=True):
 def account_spent(wall, kind):
     """Whether the account behind a walled pane is spent, for the rotation gate.
 
-    A live answer whenever there is one. When the account cannot be read, the
-    wall the account itself raised is the last good answer: it went up while
-    the reading was fresh, and it still stands only because nothing has
-    confirmed the window reopened. A wall the pane's own text raised says
-    nothing about the account — that is the stranded case, where the session is
-    using credentials this account does not have, and a switch is what put it
-    there.
-
-    Asking for a live answer alone stopped rotation for the whole of every rate
-    limit rest: hours a day, and exactly the hours the account is most likely
-    to really be spent.
+    Prefer a live answer. During an API outage, an account wall or a pane
+    wall with a future reset can supply the missing evidence. A pane wall
+    cannot identify the live account after a switch, so exclude stranded
+    walls and recent switches from that fallback.
     """
     if account_block(kind):
         return True
-    return (account_unknown(kind)
-            and str(wall.get("rule") or "").startswith("account:"))
+    return account_unknown(kind) and _wall_proves_spent(wall, kind)
+
+
+def _wall_proves_spent(wall, kind):
+    now = time.time()
+    if wall.get("stranded") or switched_recently(kind, now):
+        return False
+    return (str(wall.get("rule") or "").startswith("account:")
+            or (wall.get("reset_at") or 0) > now)
 
 
 def account_reset_for(kind):
@@ -1404,7 +1404,7 @@ def _rotate_rank(profile, now):
     return (2, min(spent))
 
 
-def rotate_account(kind):
+def rotate_account(kind, wall=None):
     """Switch to whichever named account reopens first. True when it switched.
 
     Every named profile is ranked, the live one included, so the account just
@@ -1451,6 +1451,13 @@ def rotate_account(kind):
             for profile in fresh:
                 profile["active"] = profile["slug"] in active
             named = fresh
+    # The pane's reset supplies a rank when the live profile cannot be read.
+    # Otherwise two unread profiles tie and the spent live account wins forever.
+    if wall and _wall_proves_spent(wall, kind):
+        named = [dict(p, at=now, windows=[{
+            "percent": 100, "resets_at": wall.get("reset_at") or now + BLIND_RETRY_S,
+        }]) if p.get("active") and _rotate_rank(p, now)[0] == 1 else p
+                 for p in named]
     live = next((p for p in named if p.get("active")), None)
     best = min(named, key=lambda p: _rotate_rank(p, now))
     if live is not None:
@@ -1840,7 +1847,7 @@ def tick(agents, pending):
         # triggers one.
         if (pane_id in armed and wall["status"] == "waiting"
                 and kind in ACCOUNT_KINDS and account_spent(wall, kind)
-                and rotate_account(kind)):
+                and rotate_account(kind, wall)):
             # The account we just moved to may be spent as well. Prompting is
             # how that shows: the wall returns and the ranking is asked again.
             attempt_resume(pane_id, wall, info)

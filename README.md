@@ -487,9 +487,11 @@ A switch needs the account to be spent, and the usage endpoint cannot always
 say so: while it is rate limited its last answer goes stale, and a stale answer
 is no answer. Rotation then leans on the wall instead. A wall the account itself
 raised went up while the reading was fresh and stands only because nothing has
-confirmed the window reopened, so it is reason enough to move. A wall the pane's
-own text raised is not — that is the stranded case, where the session is using
-credentials this account does not have, and a switch is what put it there.
+confirmed the window reopened, so it is reason enough to move. A pane message
+with a future reset time also supplies that evidence when the API is unavailable,
+and ranks an unread live profile as spent. Walls marked stranded and walls seen
+within the switch-memory window cannot supply this fallback: they may still
+describe the account the session was using before the switch.
 
 It ranks the accounts it may switch to. `account-switch` publishes what each
 saved account has left, parked ones included, so rotation takes an account with

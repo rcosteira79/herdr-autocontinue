@@ -688,6 +688,21 @@ check("it switched back", A.rotate_account("claude") is True)
 check("and to the sooner account", switches(calls) == ["personal"],
       str(switches(calls)))
 
+print("\na timed wall ranks an unread active account as spent")
+for reset_in, expected in [(7200, True), (300, False)]:
+    a_successful_switch()
+    A.ROTATE_PROFILES = ["personal", "mindera"]
+    A._switch_profiles = lambda script, kind: [
+        account("personal", "Personal", None, active=True, read_ago=7200),
+        account("mindera", "Mindera", None, read_ago=7200)]
+    A._save(A.ROTATE_STATE, {"last_refresh": time.time()})
+    calls, A.subprocess.run = recorder([])
+    evidence = {"rule": "any-usage-limit", "reset_at": A.time.time() + reset_in}
+    check("wall-based ranking respects the unknown-account horizon %s" % reset_in,
+          A.rotate_account("claude", evidence) is expected)
+    check("only the other profile can be selected",
+          switches(calls) == (["mindera"] if expected else []))
+
 print("\nan account nobody could read is not guessed at while the live one is due")
 a_successful_switch()
 A.ROTATE_PROFILES = ["spare", "mindera"]
@@ -1268,6 +1283,7 @@ A.USE_ACCOUNT = was_use
 # nothing has confirmed the window reopened.
 
 print("\nrotation still fires on a wall the account raised")
+A._save(A.ROTATE_STATE, {})
 A._save(A.ARMED, ["w1:pB"])
 account_wall = dict(a_wall(3600))
 account_wall["pane_id"] = "w1:pB"
@@ -1276,18 +1292,27 @@ A.pane_text = lambda pane_id, lines=None: "nothing about limits here"
 resting_cache(STALE_AGE_S)
 rotations = []
 REAL_ROTATE = A.rotate_account
-A.rotate_account = lambda kind: (rotations.append(kind) or False)
+A.rotate_account = lambda kind, wall=None: (rotations.append(kind) or False)
 A.tick(idle_claude, set())
 check("the switch is considered", rotations == ["claude"], str(rotations))
 
-print("\nbut not on one the pane's own text raised")
+print("\na timed pane wall also permits rotation during an API outage")
+A._save(A.ROTATE_STATE, {})
 text_wall = dict(account_wall)
 text_wall["rule"] = "claude-5h"             # a text rule, not the account
 A._save(A.WALLS, {"w1:pB": text_wall})
 A.pane_text = lambda pane_id, lines=None: "5-hour limit reached \u2219 resets 11pm"
 del rotations[:]
 A.tick(idle_claude, set())
-check("the account never said this one was spent", rotations == [], str(rotations))
+check("the pane reset supplies the missing evidence", rotations == ["claude"], str(rotations))
+A._save(A.ROTATE_STATE, {"switched": {"claude": A.time.time()}})
+check("a recent switch prevents attributing the pane wall to the new account",
+      not A.account_spent(text_wall, "claude"))
+A._save(A.ROTATE_STATE, {})
+check("a stranded wall remains excluded after switch memory expires",
+      not A.account_spent(dict(text_wall, stranded=True), "claude"))
+check("a text wall without a future reset is insufficient evidence",
+      not A.account_spent(dict(text_wall, reset_at=None), "claude"))
 
 print("\nand never while the account is readable and has room")
 A._save(A.WALLS, {"w1:pB": dict(account_wall)})
