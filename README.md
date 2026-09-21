@@ -389,6 +389,19 @@ no answer at all: walls already up stand, no new one is raised from it, and it
 never reads as "the account has room". A reading 34 minutes old once said 100%
 and put a countdown on sixteen idle panes while the account was at 21%.
 
+If an armed agent shows a limit but has not switched accounts, check
+`HERDR_PLUGIN_STATE_DIR/autocontinue.log` for
+`usage api (claude): rate limited, resting 900s`. This means the usage-reading
+API is refusing requests; it is separate from the agent exhausting its usage
+allowance. Repeated refusals can leave account usage unavailable across several
+15-minute rests.
+
+Rotation can still use a detected pane limit with a future reset time while
+the API is unavailable. It keeps the configured profile restrictions and
+cooldowns, and excludes walls that may belong to an account already switched
+away from. A switch is therefore not guaranteed immediately: another eligible
+profile must still be worth trying. See the rotation rules below.
+
 ## Rotating to another account
 
 If [account-switch](https://github.com/rcosteira79/herdr-account-switch) is installed, a spent account can hand
