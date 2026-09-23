@@ -444,6 +444,8 @@ def record_badge(*args, **kwargs):
         for i, arg in enumerate(args):
             if arg == "--token":
                 badged["token"] = args[i + 1]
+            elif arg == "--clear-token":
+                badged["cleared"] = args[i + 1]
     return _Ran(0)
 
 
@@ -452,7 +454,7 @@ A.pane_text = lambda pane_id, lines=None: "Usage limit reached"
 A.account_block = lambda kind=None: (time.time() + 2 * 3600 + 3 * 60,
                                      "session", 100)
 A.ROTATE_PROFILES = []                     # no switching in this check
-A._save(A.ARMED, [])                       # unarmed: badge only, never a prompt
+A._save(A.ARMED, ["w1:pA"])                # armed, reset is still in the future
 A._save(A.WALLS, {"w1:pA": a_wall(3 * 3600 + 26 * 60)})
 # `agent` is the kind herdr reports; the human-readable name is `name`.
 A.tick({"w1:pA": {"agent_status": "idle", "agent": "claude",
@@ -1358,15 +1360,15 @@ check("the other kind is left alone",
       "stranded" not in walls["w1:pB"] and walls["w1:pB"]["attempts"] == 0,
       str(walls["w1:pB"]))
 
-print("\nan unarmed pane a switch stranded says so instead of counting down")
+print("\nan unarmed pane a switch stranded has no sidebar badge")
 badged.clear()
 REAL_RUN, REAL_HERDR = A.subprocess.run, A.herdr
 A.herdr = record_badge
 A._save(A.ARMED, [])
 A.set_badge("w1:pA", A.load_walls()["w1:pA"], set())
-check("it shows the give-up glyph",
-      badged.get("token", "").endswith(A.GLYPH_GAVEUP),
-      str(badged.get("token")))
+check("it clears the badge",
+      badged.get("cleared") == A.TOKEN and "token" not in badged,
+      str(badged))
 
 print("\nbut an armed one still counts down, because we resume it ourselves")
 badged.clear()
@@ -1675,6 +1677,29 @@ with patch.object(A, "herdr") as report:
 check("dismissing a wall retains the armed glyph",
       any("wall=" + A.GLYPH_ARMED in call.args
           for call in report.call_args_list))
+
+print("\nunarmed panes clear badges while keeping detected walls")
+for status, stranded in [("waiting", False), ("waiting", True), ("gaveup", False)]:
+    wall = dict(a_wall(3600), status=status, stranded=stranded)
+    for kind in ("claude", ""):
+        A.save_armed(set())
+        A.save_walls({"w1:pA": wall})
+        with patch.object(A, "herdr") as report, \
+                patch.object(A, "pane_text", return_value=None):
+            A.tick({"w1:pA": {"agent": kind, "agent_status": "idle"}}, set())
+        check("unarmed %s / stranded=%s / kind=%r clears its badge" %
+              (status, stranded, kind),
+              any("--clear-token" in call.args for call in report.call_args_list)
+              and not any("--token" in call.args for call in report.call_args_list))
+        check("the wall remains available in the list", A.load_walls() == {"w1:pA": wall})
+
+A.save_armed({"w1:pA"})
+A.save_walls({"w1:pA": a_wall(3600)})
+with patch.object(A, "herdr") as report:
+    state = A.toggle_armed("w1:pA")
+check("disarming a walled pane clears its badge immediately",
+      state is False and any("--clear-token" in call.args for call in report.call_args_list)
+      and not any("--token" in call.args for call in report.call_args_list))
 
 print("\nthe wake handler is ready before the daemon publishes its pid")
 import subprocess

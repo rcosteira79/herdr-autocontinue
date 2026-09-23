@@ -20,8 +20,8 @@ agent when it is over.
 ## What it does
 
 - **Detect** — every claude/codex pane is read each poll. A pane showing a
-  limit wall gets a countdown badge (`$wall`) whether or not you armed it.
-  This half is pure observability and always on.
+  limit wall appears in the wall list, whether or not you armed it.
+  Only armed panes get a sidebar countdown badge (`$wall`).
 - **Resume** — panes you **armed** get `continue` submitted once the window
   reopens. Nothing is ever typed into a pane you did not arm.
 - **Back off** — if the wall is still up (the parse was off, or it was the
@@ -58,11 +58,10 @@ agent when it is over.
   later answer never makes an armed pane wait longer, and a pane already
   backing off keeps the retry it earned.
 
-Badges: `🔄` armed, standing by · `🔄3h09` armed, will continue · `⏸3h09` seen
-but not armed · `⚠` gave up, or a pane you did not arm that a switch moved the
-account out from under. An armed agent carries the glyph from the moment
-you arm it, so arming is visible without waiting for a wall; the countdown is
-what a wall adds. No badge means not armed and nothing seen.
+Badges: `🔄` armed, standing by · `🔄3h09` armed, will continue · `⚠` armed,
+gave up. An armed agent carries the glyph from the moment you arm it; the
+countdown appears when a wall is detected. Unarmed agents have no sidebar
+badge, even when a wall is detected. Their walls remain visible in the wall list.
 
 ### Arming is opt-in, per agent
 
@@ -271,8 +270,7 @@ environment, so setting one means exporting it before herdr starts.
 | `AUTOCONTINUE_BUSY_RETRY_S` | `60` | how long a wall waits over while the agent is busy or waiting on you |
 | `AUTOCONTINUE_ROTATE_REFRESH_GAP_S` | `300` | least time between fresh reads of the accounts |
 | `AUTOCONTINUE_GLYPH_ARMED` | `🔄` | badge for an armed agent |
-| `AUTOCONTINUE_GLYPH_SEEN` | `⏸` | badge for a wall on an agent you did not arm |
-| `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge after the last attempt failed, or when a switch stranded an unarmed pane |
+| `AUTOCONTINUE_GLYPH_GAVEUP` | `⚠` | badge for an armed agent after the last attempt failed |
 | `AUTOCONTINUE_DRY_RUN` | `0` | detect, badge and log, but never type |
 | `HERDR_BIN_PATH` | `herdr` | herdr binary (set by herdr when it invokes an action) |
 

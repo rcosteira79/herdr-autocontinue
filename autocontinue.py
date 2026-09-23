@@ -8,10 +8,10 @@ a poll loop can read it, sit out the window, and prod the agent when it opens.
 
 Two halves:
 
-  detect   a pane showing a wall gets a countdown badge ($wall) whether or not
-           you armed it. Free observability — this is how you notice an agent
-           died at 11:04. herdr's `pane.agent_status_changed` hook wakes the
-           daemon the moment an agent stops, so the sweep behind it is slow.
+  detect   walls are tracked for every pane and shown in the wall list. Only
+           armed panes get a sidebar badge ($wall). herdr's
+           `pane.agent_status_changed` hook wakes the daemon the moment an
+           agent stops, so the sweep behind it is slow.
 
   resume   only panes you *armed* are typed into. At the reset time the daemon
            re-reads the pane, and if the wall is still there and the agent is
@@ -179,9 +179,6 @@ KINDS = _list("AUTOCONTINUE_KINDS")
 TOKEN = "wall"
 GLYPH_ARMED = _setting("AUTOCONTINUE_GLYPH_ARMED") or (
     "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS}"  # 🔄 will resume
-)
-GLYPH_IDLE = _setting("AUTOCONTINUE_GLYPH_SEEN") or (
-    "\N{DOUBLE VERTICAL BAR}"                     # ⏸ seen, not armed
 )
 GLYPH_GAVEUP = _setting("AUTOCONTINUE_GLYPH_GAVEUP") or (
     "\N{WARNING SIGN}"                            # ⚠ gave up
@@ -561,17 +558,13 @@ def _set_token(pane_id, text):
 
 
 def set_badge(pane_id, wall, armed):
+    if pane_id not in armed:
+        clear_badge(pane_id)
+        return
     if wall["status"] == "gaveup":
         text = GLYPH_GAVEUP
-    elif wall.get("stranded") and pane_id not in armed:
-        # The account moved out from under this pane and nothing here will type
-        # into one nobody armed. Its own harness was going to restart it against
-        # an account that is no longer installed, so a countdown here would be
-        # a promise from something that has stopped watching the clock for it.
-        text = GLYPH_GAVEUP
     else:
-        glyph = GLYPH_ARMED if pane_id in armed else GLYPH_IDLE
-        text = glyph + _countdown(wall["resume_at"] - time.time())
+        text = GLYPH_ARMED + _countdown(wall["resume_at"] - time.time())
     _set_token(pane_id, text)
 
 
@@ -1676,7 +1669,7 @@ _absent = {}  # pane_id -> consecutive polls it has been missing from the list
 
 
 def tick(agents, pending):
-    """One poll: badge every walled pane, resume the armed ones that are due."""
+    """One poll: track walls, badge armed panes, and resume those that are due."""
     walls = load_walls()
     armed = load_armed()
     now = time.time()
@@ -1708,8 +1701,7 @@ def tick(agents, pending):
     for pane_id, info in agents.items():
         kind = kind_of(info)
         if kind is None:
-            if pane_id in armed:
-                refresh_badge(pane_id, walls.get(pane_id), armed)
+            refresh_badge(pane_id, walls.get(pane_id), armed)
             continue
         wall = walls.get(pane_id)
         if info.get("agent_status") == "working":
